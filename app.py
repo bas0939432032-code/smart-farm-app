@@ -1,4 +1,4 @@
-"""ระบบจัดการฟาร์มอัจฉริยะ: Full Stack OOP Demonstration."""
+"""ระบบจัดการฟาร์มอัจฉริยะตามโครงสร้าง OOP ที่กำหนด."""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -13,6 +13,14 @@ import streamlit as st
 
 class ValidationError(ValueError):
     """ข้อผิดพลาดจากข้อมูลนำเข้าที่ไม่ผ่านกฎธุรกิจ"""
+
+
+class ISensorObserver(ABC):
+    """Interface สำหรับผู้รับการแจ้งเตือนจากเซนเซอร์"""
+
+    @abstractmethod
+    def update(self, message: str) -> None:
+        raise NotImplementedError
 
 
 class User:
@@ -314,7 +322,15 @@ class IrrigationTask:
 
 
 class HarvestRecord:
-    def __init__(self, record_id: int, crop_id: int, crop_name: str, harvest_date: date, yield_kg: float, revenue: float) -> None:
+    def __init__(self, record_id: int, *args: Any, **kwargs: Any) -> None:
+        if len(args) == 5:
+            crop_id, crop_name, harvest_date, yield_kg, revenue = args
+        elif len(args) in {3, 4}:
+            crop_name, yield_kg, revenue = args[:3]
+            crop_id = kwargs.pop("crop_id", 0)
+            harvest_date = args[3] if len(args) == 4 else kwargs.pop("harvest_date", date.today())
+        else:
+            raise ValidationError("รูปแบบข้อมูลการเก็บเกี่ยวไม่ถูกต้อง")
         if yield_kg <= 0 or revenue < 0:
             raise ValidationError("ผลผลิตต้องมากกว่า 0 และรายได้ต้องไม่ติดลบ")
         self._record_id, self._crop_id, self._crop_name = record_id, crop_id, crop_name
@@ -345,7 +361,7 @@ class HarvestRecord:
         return self._revenue
 
 
-class Notification:
+class Notification(ISensorObserver):
     def __init__(self, notification_id: int, title: str, message: str, severity: str = "แจ้งเตือน") -> None:
         self._notification_id, self._title, self._message = notification_id, title, message
         self._severity, self._created_at, self._is_read = severity, datetime.now(), False
@@ -377,6 +393,10 @@ class Notification:
     def mark_read(self) -> None:
         self._is_read = True
 
+    def update(self, message: str) -> None:
+        self._message = message
+        self._is_read = False
+
 
 class DeviceFactory:
     @staticmethod
@@ -388,6 +408,20 @@ class DeviceFactory:
         if device_type == "วาล์วรดน้ำ":
             return ActuatorDevice(device_id, name, plot_id, "วาล์วน้ำ")
         raise ValidationError("ไม่รู้จักประเภทอุปกรณ์")
+
+    @staticmethod
+    def create_device(device_type: str, device_id: int, name: str, location: Any, parameter: str) -> Device:
+        """ชื่อเมธอดแบบเดียวกับ API ในตัวอย่างที่ผู้ใช้ส่งมา"""
+        plot_id = location if isinstance(location, int) and location > 0 else 1
+        if device_type.lower() == "sensor":
+            return SensorDevice(device_id, name, plot_id, parameter)
+        if device_type.lower() == "actuator":
+            try:
+                capacity = float(parameter)
+            except (TypeError, ValueError) as error:
+                raise ValidationError("ความจุอุปกรณ์ต้องเป็นตัวเลข") from error
+            return ActuatorDevice(device_id, name, plot_id, "วาล์วน้ำ")
+        raise ValidationError("ประเภทอุปกรณ์ต้องเป็น Sensor หรือ Actuator")
 
 
 class IIrrigationStrategy(ABC):
@@ -411,6 +445,11 @@ class MoistureBasedStrategy(IIrrigationStrategy):
             raise ValidationError("ค่าความชื้นหรือพื้นที่ไม่ถูกต้อง")
         return max(5, min(120, round((55 - moisture) * area_sqm / 12))) if moisture < 55 else 0
 
+    def calculate_water(self, current_moisture: float, target_moisture: float) -> float:
+        if not 0 <= current_moisture <= 100 or not 0 <= target_moisture <= 100:
+            raise ValidationError("ค่าความชื้นต้องอยู่ระหว่าง 0-100%")
+        return round(max(0, target_moisture - current_moisture) * 2.5, 2)
+
 
 class TimerBasedStrategy(IIrrigationStrategy):
     @property
@@ -421,6 +460,9 @@ class TimerBasedStrategy(IIrrigationStrategy):
         if area_sqm <= 0:
             raise ValidationError("พื้นที่ต้องมากกว่า 0")
         return max(5, min(120, round(area_sqm / 2)))
+
+    def calculate_water(self, current_moisture: float, target_moisture: float) -> float:
+        return 15.0
 
 
 class NotificationObserver:
@@ -467,6 +509,29 @@ class FarmRepository:
 
     def get(self, table: str, item_id: int, attr: str) -> Optional[Any]:
         return next((item for item in self._data[table] if getattr(item, attr, None) == item_id), None)
+
+    def get_farm(self) -> Optional[Farm]:
+        farms = self.all("farms")
+        if farms:
+            return farms[0]
+        farmer = Farmer(1, "เกษตรกรตัวอย่าง", "farmer@example.com", "farm1234")
+        self.add("users", farmer)
+        farm = Farm(self.next_id("farms"), "ฟาร์มบ้านสุขใจ", "เชียงใหม่", farmer.user_id)
+        farmer.assign_farm(farm)
+        self.add("farms", farm)
+        plot = Plot(self.next_id("plots"), "แปลงผัก A1", 120)
+        farm.add_plot(plot)
+        self.add("plots", plot)
+        crop = Crop(self.next_id("crops"), "ผักสลัด", date.today())
+        plot.add_crop(crop)
+        self.add("crops", crop)
+        return farm
+
+    def get_harvests(self) -> List[HarvestRecord]:
+        return self.all("harvest_records")
+
+    def add_harvest(self, record: HarvestRecord) -> HarvestRecord:
+        return self.add("harvest_records", record)
 
 
 class SmartFarmService:
