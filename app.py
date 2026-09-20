@@ -1,110 +1,106 @@
-"""ระบบจัดการฟาร์มอัจฉริยะตามโครงสร้าง OOP ที่กำหนด."""
+"""Smart Farm Management System - Full Stack OOP Project Standard."""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import date, datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 import hashlib
+import io
+import unittest
 
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
 
+# ============================= Domain and contracts =============================
 class ValidationError(ValueError):
-    """ข้อผิดพลาดจากข้อมูลนำเข้าที่ไม่ผ่านกฎธุรกิจ"""
-
-
-class ISensorObserver(ABC):
-    """Interface สำหรับผู้รับการแจ้งเตือนจากเซนเซอร์"""
-
-    @abstractmethod
-    def update(self, message: str) -> None:
-        raise NotImplementedError
+    """ข้อมูลนำเข้าไม่ผ่านกฎธุรกิจ"""
 
 
 class User:
-    def __init__(self, user_id: int, name: str, email: str, password: str) -> None:
-        self._user_id = self._positive_int(user_id, "รหัสผู้ใช้")
-        self._name = self._required(name, "ชื่อผู้ใช้")
-        self._email = self._required(email, "อีเมล").lower()
-        self._password_hash = self._hash_password(password)
-
-    @staticmethod
-    def _required(value: str, label: str) -> str:
-        if not isinstance(value, str) or not value.strip():
-            raise ValidationError(f"{label}ต้องไม่ว่าง")
-        return value.strip()
-
-    @staticmethod
-    def _positive_int(value: int, label: str) -> int:
-        if not isinstance(value, int) or value <= 0:
-            raise ValidationError(f"{label}ต้องเป็นจำนวนเต็มบวก")
-        return value
-
-    @staticmethod
-    def _hash_password(password: str) -> str:
-        if not isinstance(password, str) or len(password) < 4:
+    def __init__(self, user_id: int, username: str, email: str, password: str, role: str) -> None:
+        if user_id <= 0 or not username.strip() or "@" not in email:
+            raise ValidationError("ข้อมูลผู้ใช้ไม่ถูกต้อง")
+        if len(password) < 4:
             raise ValidationError("รหัสผ่านต้องมีอย่างน้อย 4 ตัวอักษร")
-        return hashlib.sha256(password.encode("utf-8")).hexdigest()
+        self._user_id = user_id
+        self._username = username.strip()
+        self._email = email.strip().lower()
+        self._password_hash = hashlib.sha256(password.encode()).hexdigest()
+        self._role = role
 
     @property
     def user_id(self) -> int:
         return self._user_id
 
     @property
-    def name(self) -> str:
-        return self._name
+    def username(self) -> str:
+        return self._username
+
+    @username.setter
+    def username(self, value: str) -> None:
+        if not value or not value.strip():
+            raise ValidationError("ชื่อผู้ใช้ต้องไม่ว่าง")
+        self._username = value.strip()
 
     @property
     def email(self) -> str:
         return self._email
 
+    @email.setter
+    def email(self, value: str) -> None:
+        if "@" not in value:
+            raise ValidationError("อีเมลไม่ถูกต้อง")
+        self._email = value.strip().lower()
+
+    @property
+    def role(self) -> str:
+        return self._role
+
     def authenticate(self, password: str) -> bool:
-        return self._password_hash == self._hash_password(password)
+        return self._password_hash == hashlib.sha256(password.encode()).hexdigest()
 
 
 class Farmer(User):
-    def __init__(self, user_id: int, name: str, email: str, password: str) -> None:
-        super().__init__(user_id, name, email, password)
+    def __init__(self, user_id: int, username: str, email: str, password: str, farm_license: str = "SMART-2026") -> None:
+        super().__init__(user_id, username, email, password, "เกษตรกร")
+        self._farm_license = farm_license
         self._farms: List[Farm] = []
+
+    @property
+    def farm_license(self) -> str:
+        return self._farm_license
 
     @property
     def farms(self) -> List[Farm]:
         return list(self._farms)
 
-    def assign_farm(self, farm: Farm) -> None:
+    def manage_farm(self, farm: Farm) -> None:
         if farm not in self._farms:
             self._farms.append(farm)
 
 
 class Admin(User):
+    def __init__(self, user_id: int, username: str, email: str, password: str, admin_level: int = 1) -> None:
+        super().__init__(user_id, username, email, password, "ผู้ดูแลระบบ")
+        if admin_level < 1:
+            raise ValidationError("ระดับผู้ดูแลระบบไม่ถูกต้อง")
+        self._admin_level = admin_level
+
     @property
-    def role(self) -> str:
-        return "ผู้ดูแลระบบ"
+    def admin_level(self) -> int:
+        return self._admin_level
 
 
 class Device(ABC):
-    def __init__(self, device_id: int, name: str, plot_id: int) -> None:
-        self._device_id = self._positive(device_id, "รหัสอุปกรณ์")
-        self._name = self._required(name, "ชื่ออุปกรณ์")
-        self._plot_id = self._positive(plot_id, "รหัสแปลง")
-        self._is_online = True
-
-    @staticmethod
-    def _required(value: str, label: str) -> str:
-        if not isinstance(value, str) or not value.strip():
-            raise ValidationError(f"{label}ต้องไม่ว่าง")
-        return value.strip()
-
-    @staticmethod
-    def _positive(value: int, label: str) -> int:
-        if not isinstance(value, int) or value <= 0:
-            raise ValidationError(f"{label}ต้องเป็นจำนวนเต็มบวก")
-        return value
+    def __init__(self, device_id: str, name: str, location: str) -> None:
+        if not device_id.strip() or not name.strip() or not location.strip():
+            raise ValidationError("รหัส ชื่อ และตำแหน่งอุปกรณ์ต้องไม่ว่าง")
+        self._device_id, self._name, self._location = device_id.strip(), name.strip(), location.strip()
+        self._is_active = True
 
     @property
-    def device_id(self) -> int:
+    def device_id(self) -> str:
         return self._device_id
 
     @property
@@ -112,61 +108,68 @@ class Device(ABC):
         return self._name
 
     @property
-    def plot_id(self) -> int:
-        return self._plot_id
+    def location(self) -> str:
+        return self._location
 
     @property
-    def is_online(self) -> bool:
-        return self._is_online
+    def is_active(self) -> bool:
+        return self._is_active
 
-    def set_online(self, online: bool) -> None:
-        self._is_online = bool(online)
+    def set_active(self, active: bool) -> None:
+        self._is_active = bool(active)
 
     @abstractmethod
-    def execute_action(self, action: str) -> str:
+    def execute_action(self) -> str:
         raise NotImplementedError
 
 
 class SensorDevice(Device):
-    def __init__(self, device_id: int, name: str, plot_id: int, sensor_type: str) -> None:
-        super().__init__(device_id, name, plot_id)
-        self._sensor_type = self._required(sensor_type, "ประเภทเซนเซอร์")
+    def __init__(self, device_id: str, name: str, location: str, sensor_type: str) -> None:
+        super().__init__(device_id, name, location)
+        self._sensor_type = sensor_type.strip() or (_ for _ in ()).throw(ValidationError("ประเภทเซนเซอร์ต้องไม่ว่าง"))
 
     @property
     def sensor_type(self) -> str:
         return self._sensor_type
 
-    def execute_action(self, action: str) -> str:
-        return f"อ่านค่า{self._sensor_type}จาก {self._name} สำเร็จ ({action})"
+    def execute_action(self) -> str:
+        return f"อ่านค่าจาก {self._name} ({self._sensor_type}) สำเร็จ"
 
 
 class ActuatorDevice(Device):
-    def __init__(self, device_id: int, name: str, plot_id: int, actuator_type: str) -> None:
-        super().__init__(device_id, name, plot_id)
-        self._actuator_type = self._required(actuator_type, "ประเภทแอคชูเอเตอร์")
+    def __init__(self, device_id: str, name: str, location: str, capacity_lpm: float) -> None:
+        super().__init__(device_id, name, location)
+        if capacity_lpm <= 0:
+            raise ValidationError("อัตราการไหลต้องมากกว่า 0")
+        self._capacity_lpm = float(capacity_lpm)
         self._state = "ปิด"
 
     @property
-    def actuator_type(self) -> str:
-        return self._actuator_type
+    def capacity_lpm(self) -> float:
+        return self._capacity_lpm
 
     @property
     def state(self) -> str:
         return self._state
 
-    def execute_action(self, action: str) -> str:
-        if action not in {"เปิด", "ปิด"}:
-            raise ValidationError("คำสั่งอุปกรณ์ต้องเป็น เปิด หรือ ปิด")
-        self._state = action
-        return f"{self._name} เปลี่ยนสถานะเป็น {action}แล้ว"
+    def execute_action(self) -> str:
+        self._state = "เปิด"
+        return f"เปิดระบบรดน้ำ {self._name} อัตราไหล {self._capacity_lpm:g} ลิตร/นาที"
+
+    def switch(self, state: str) -> str:
+        if state not in {"เปิด", "ปิด"}:
+            raise ValidationError("สถานะต้องเป็น เปิด หรือ ปิด")
+        self._state = state
+        return f"{self._name} เปลี่ยนสถานะเป็น {state}"
 
 
 class Crop:
-    def __init__(self, crop_id: int, name: str, plant_date: date, status: str = "กำลังปลูก") -> None:
-        if not name or not name.strip():
-            raise ValidationError("ชื่อพืชต้องไม่ว่าง")
+    def __init__(self, crop_id: int, name: str, ideal_moisture: float, growth_days: int) -> None:
+        if not name.strip() or not 0 <= ideal_moisture <= 100 or growth_days <= 0:
+            raise ValidationError("ข้อมูลพืชไม่ถูกต้อง")
         self._crop_id, self._name = crop_id, name.strip()
-        self._plant_date, self._status = plant_date, status
+        self._ideal_moisture, self._growth_days = ideal_moisture, growth_days
+        self._status = "กำลังปลูก"
 
     @property
     def crop_id(self) -> int:
@@ -177,25 +180,26 @@ class Crop:
         return self._name
 
     @property
-    def plant_date(self) -> date:
-        return self._plant_date
+    def ideal_moisture(self) -> float:
+        return self._ideal_moisture
+
+    @property
+    def growth_days(self) -> int:
+        return self._growth_days
 
     @property
     def status(self) -> str:
         return self._status
 
-    def mark_harvested(self) -> None:
+    def harvest(self) -> None:
         self._status = "เก็บเกี่ยวแล้ว"
 
 
 class Plot:
     def __init__(self, plot_id: int, name: str, area_sqm: float) -> None:
-        if area_sqm <= 0:
-            raise ValidationError("พื้นที่แปลงต้องมากกว่า 0")
-        if not name or not name.strip():
-            raise ValidationError("ชื่อแปลงต้องไม่ว่าง")
-        self._plot_id, self._name = plot_id, name.strip()
-        self._area_sqm = float(area_sqm)
+        if area_sqm <= 0 or not name.strip():
+            raise ValidationError("ชื่อแปลงต้องไม่ว่างและพื้นที่ต้องมากกว่า 0")
+        self._plot_id, self._name, self._area_sqm = plot_id, name.strip(), float(area_sqm)
         self._crops: List[Crop] = []
 
     @property
@@ -214,19 +218,22 @@ class Plot:
     def crops(self) -> List[Crop]:
         return list(self._crops)
 
-    def add_crop(self, crop: Crop) -> None:
-        if any(item.status == "กำลังปลูก" for item in self._crops):
-            raise ValidationError("หนึ่งแปลงมีพืชที่กำลังปลูกได้ครั้งละหนึ่งรายการ")
+    @property
+    def current_crop(self) -> Optional[Crop]:
+        return next((crop for crop in self._crops if crop.status == "กำลังปลูก"), None)
+
+    def plant_crop(self, crop: Crop) -> None:
+        if self.current_crop:
+            raise ValidationError("แปลงนี้มีพืชที่กำลังปลูกอยู่แล้ว")
         self._crops.append(crop)
 
 
 class Farm:
-    def __init__(self, farm_id: int, name: str, location: str, farmer_id: int) -> None:
-        if not name.strip() or not location.strip():
-            raise ValidationError("ชื่อฟาร์มและสถานที่ตั้งต้องไม่ว่าง")
-        self._farm_id, self._name = farm_id, name.strip()
-        self._location, self._farmer_id = location.strip(), farmer_id
-        self._plots: List[Plot] = []
+    def __init__(self, farm_id: int, name: str, owner: Farmer, location: str = "ไม่ระบุ") -> None:
+        if not name.strip():
+            raise ValidationError("ชื่อฟาร์มต้องไม่ว่าง")
+        self._farm_id, self._name, self._owner, self._location = farm_id, name.strip(), owner, location
+        self._plots: List[Plot] = []  # Composition: Farm owns Plot lifecycle.
 
     @property
     def farm_id(self) -> int:
@@ -237,120 +244,95 @@ class Farm:
         return self._name
 
     @property
-    def location(self) -> str:
-        return self._location
+    def owner(self) -> Farmer:
+        return self._owner
 
     @property
-    def farmer_id(self) -> int:
-        return self._farmer_id
+    def location(self) -> str:
+        return self._location
 
     @property
     def plots(self) -> List[Plot]:
         return list(self._plots)
 
-    def add_plot(self, plot: Plot) -> None:
-        if any(item.name.lower() == plot.name.lower() for item in self._plots):
-            raise ValidationError("ชื่อแปลงในฟาร์มนี้ซ้ำกัน")
+    def add_plot(self, name: str, area_sqm: float) -> Plot:
+        if any(plot.name.lower() == name.strip().lower() for plot in self._plots):
+            raise ValidationError("ชื่อแปลงซ้ำกันในฟาร์ม")
+        plot = Plot(len(self._plots) + 1, name, area_sqm)
         self._plots.append(plot)
+        return plot
 
 
 class SensorData:
-    def __init__(self, record_id: int, plot_id: int, sensor_type: str, value: float, recorded_at: Optional[datetime] = None) -> None:
-        if not sensor_type.strip() or not isinstance(value, (int, float)):
-            raise ValidationError("ประเภทและค่าของเซนเซอร์ไม่ถูกต้อง")
-        if sensor_type == "ความชื้นในดิน" and not 0 <= value <= 100:
-            raise ValidationError("ความชื้นในดินต้องอยู่ระหว่าง 0-100%")
-        self._record_id, self._plot_id = record_id, plot_id
-        self._sensor_type, self._value = sensor_type, float(value)
-        self._recorded_at = recorded_at or datetime.now()
+    def __init__(self, data_id: int, device_id: str, moisture: float, temp: float) -> None:
+        if not 0 <= moisture <= 100 or temp < -50 or temp > 80:
+            raise ValidationError("ค่าความชื้นหรืออุณหภูมิอยู่นอกช่วงที่รองรับ")
+        self._data_id, self._device_id = data_id, device_id
+        self._moisture, self._temp, self._timestamp = moisture, temp, datetime.now()
 
     @property
-    def record_id(self) -> int:
-        return self._record_id
+    def data_id(self) -> int:
+        return self._data_id
 
     @property
-    def plot_id(self) -> int:
-        return self._plot_id
+    def device_id(self) -> str:
+        return self._device_id
 
     @property
-    def sensor_type(self) -> str:
-        return self._sensor_type
+    def moisture(self) -> float:
+        return self._moisture
 
     @property
-    def value(self) -> float:
-        return self._value
+    def temp(self) -> float:
+        return self._temp
 
     @property
-    def recorded_at(self) -> datetime:
-        return self._recorded_at
+    def timestamp(self) -> str:
+        return self._timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
 
 class IrrigationTask:
-    def __init__(self, task_id: int, plot_id: int, duration_minutes: int, mode: str, status: str = "รอดำเนินการ") -> None:
-        if duration_minutes <= 0 or duration_minutes > 240:
-            raise ValidationError("ระยะเวลารดน้ำต้องอยู่ระหว่าง 1-240 นาที")
-        self._task_id, self._plot_id = task_id, plot_id
-        self._duration_minutes, self._mode, self._status = duration_minutes, mode, status
-        self._created_at = datetime.now()
+    def __init__(self, task_id: int, plot_name: str, water_amount: float, status: str = "รอดำเนินการ") -> None:
+        if water_amount <= 0:
+            raise ValidationError("ปริมาณน้ำต้องมากกว่า 0")
+        self._task_id, self._plot_name = task_id, plot_name
+        self._water_amount, self._status = float(water_amount), status
 
     @property
     def task_id(self) -> int:
         return self._task_id
 
     @property
-    def plot_id(self) -> int:
-        return self._plot_id
+    def plot_name(self) -> str:
+        return self._plot_name
 
     @property
-    def duration_minutes(self) -> int:
-        return self._duration_minutes
-
-    @property
-    def mode(self) -> str:
-        return self._mode
+    def water_amount(self) -> float:
+        return self._water_amount
 
     @property
     def status(self) -> str:
         return self._status
-
-    @property
-    def created_at(self) -> datetime:
-        return self._created_at
 
     def complete(self) -> None:
         self._status = "เสร็จสิ้น"
 
 
 class HarvestRecord:
-    def __init__(self, record_id: int, *args: Any, **kwargs: Any) -> None:
-        if len(args) == 5:
-            crop_id, crop_name, harvest_date, yield_kg, revenue = args
-        elif len(args) in {3, 4}:
-            crop_name, yield_kg, revenue = args[:3]
-            crop_id = kwargs.pop("crop_id", 0)
-            harvest_date = args[3] if len(args) == 4 else kwargs.pop("harvest_date", date.today())
-        else:
-            raise ValidationError("รูปแบบข้อมูลการเก็บเกี่ยวไม่ถูกต้อง")
-        if yield_kg <= 0 or revenue < 0:
-            raise ValidationError("ผลผลิตต้องมากกว่า 0 และรายได้ต้องไม่ติดลบ")
-        self._record_id, self._crop_id, self._crop_name = record_id, crop_id, crop_name
-        self._harvest_date, self._yield_kg, self._revenue = harvest_date, float(yield_kg), float(revenue)
+    def __init__(self, record_id: int, crop_name: str, yield_kg: float, revenue: float, harvest_date: Optional[str] = None) -> None:
+        if not crop_name.strip() or yield_kg <= 0 or revenue < 0:
+            raise ValidationError("ชื่อพืชต้องไม่ว่าง ผลผลิตต้องมากกว่า 0 และรายได้ห้ามติดลบ")
+        self._record_id, self._crop_name = record_id, crop_name.strip()
+        self._yield_kg, self._revenue = float(yield_kg), float(revenue)
+        self._harvest_date = harvest_date or date.today().isoformat()
 
     @property
     def record_id(self) -> int:
         return self._record_id
 
     @property
-    def crop_id(self) -> int:
-        return self._crop_id
-
-    @property
     def crop_name(self) -> str:
         return self._crop_name
-
-    @property
-    def harvest_date(self) -> date:
-        return self._harvest_date
 
     @property
     def yield_kg(self) -> float:
@@ -360,19 +342,19 @@ class HarvestRecord:
     def revenue(self) -> float:
         return self._revenue
 
+    @property
+    def harvest_date(self) -> str:
+        return self._harvest_date
 
-class Notification(ISensorObserver):
-    def __init__(self, notification_id: int, title: str, message: str, severity: str = "แจ้งเตือน") -> None:
-        self._notification_id, self._title, self._message = notification_id, title, message
-        self._severity, self._created_at, self._is_read = severity, datetime.now(), False
+
+class Notification:
+    def __init__(self, notification_id: int, message: str, severity: str = "แจ้งเตือน") -> None:
+        self._notification_id, self._message, self._severity = notification_id, message, severity
+        self._created_at, self._is_read = datetime.now(), False
 
     @property
     def notification_id(self) -> int:
         return self._notification_id
-
-    @property
-    def title(self) -> str:
-        return self._title
 
     @property
     def message(self) -> str:
@@ -383,8 +365,8 @@ class Notification(ISensorObserver):
         return self._severity
 
     @property
-    def created_at(self) -> datetime:
-        return self._created_at
+    def created_at(self) -> str:
+        return self._created_at.strftime("%H:%M:%S")
 
     @property
     def is_read(self) -> bool:
@@ -393,58 +375,30 @@ class Notification(ISensorObserver):
     def mark_read(self) -> None:
         self._is_read = True
 
-    def update(self, message: str) -> None:
-        self._message = message
-        self._is_read = False
-
-
-class DeviceFactory:
-    @staticmethod
-    def create(device_type: str, device_id: int, name: str, plot_id: int) -> Device:
-        if device_type == "เซนเซอร์ความชื้น":
-            return SensorDevice(device_id, name, plot_id, "ความชื้นในดิน")
-        if device_type == "เซนเซอร์อุณหภูมิ":
-            return SensorDevice(device_id, name, plot_id, "อุณหภูมิ")
-        if device_type == "วาล์วรดน้ำ":
-            return ActuatorDevice(device_id, name, plot_id, "วาล์วน้ำ")
-        raise ValidationError("ไม่รู้จักประเภทอุปกรณ์")
-
-    @staticmethod
-    def create_device(device_type: str, device_id: int, name: str, location: Any, parameter: str) -> Device:
-        """ชื่อเมธอดแบบเดียวกับ API ในตัวอย่างที่ผู้ใช้ส่งมา"""
-        plot_id = location if isinstance(location, int) and location > 0 else 1
-        if device_type.lower() == "sensor":
-            return SensorDevice(device_id, name, plot_id, parameter)
-        if device_type.lower() == "actuator":
-            try:
-                capacity = float(parameter)
-            except (TypeError, ValueError) as error:
-                raise ValidationError("ความจุอุปกรณ์ต้องเป็นตัวเลข") from error
-            return ActuatorDevice(device_id, name, plot_id, "วาล์วน้ำ")
-        raise ValidationError("ประเภทอุปกรณ์ต้องเป็น Sensor หรือ Actuator")
-
 
 class IIrrigationStrategy(ABC):
     @abstractmethod
-    def calculate_duration(self, moisture: float, area_sqm: float) -> int:
+    def calculate_water(self, current_moisture: float, target_moisture: float) -> float:
         raise NotImplementedError
 
-    @property
+
+class ISensorObserver(ABC):
     @abstractmethod
-    def name(self) -> str:
+    def update(self, data: SensorData) -> Optional[Notification]:
         raise NotImplementedError
+
+
+class LowMoistureObserver(ISensorObserver):
+    def __init__(self, threshold: float = 30.0) -> None:
+        self._threshold = threshold
+
+    def update(self, data: SensorData) -> Optional[Notification]:
+        if data.moisture < self._threshold:
+            return Notification(0, f"ความชื้นต่ำ: อุปกรณ์ {data.device_id} มีค่า {data.moisture:.1f}% ต่ำกว่าเกณฑ์ {self._threshold:.0f}%", "เร่งด่วน")
+        return None
 
 
 class MoistureBasedStrategy(IIrrigationStrategy):
-    @property
-    def name(self) -> str:
-        return "ตามความชื้น"
-
-    def calculate_duration(self, moisture: float, area_sqm: float) -> int:
-        if not 0 <= moisture <= 100 or area_sqm <= 0:
-            raise ValidationError("ค่าความชื้นหรือพื้นที่ไม่ถูกต้อง")
-        return max(5, min(120, round((55 - moisture) * area_sqm / 12))) if moisture < 55 else 0
-
     def calculate_water(self, current_moisture: float, target_moisture: float) -> float:
         if not 0 <= current_moisture <= 100 or not 0 <= target_moisture <= 100:
             raise ValidationError("ค่าความชื้นต้องอยู่ระหว่าง 0-100%")
@@ -452,34 +406,32 @@ class MoistureBasedStrategy(IIrrigationStrategy):
 
 
 class TimerBasedStrategy(IIrrigationStrategy):
-    @property
-    def name(self) -> str:
-        return "ตามเวลา"
-
-    def calculate_duration(self, moisture: float, area_sqm: float) -> int:
-        if area_sqm <= 0:
-            raise ValidationError("พื้นที่ต้องมากกว่า 0")
-        return max(5, min(120, round(area_sqm / 2)))
-
     def calculate_water(self, current_moisture: float, target_moisture: float) -> float:
         return 15.0
 
 
-class NotificationObserver:
-    def update(self, data: SensorData) -> Optional[Notification]:
-        if data.sensor_type == "ความชื้นในดิน" and data.value < 30:
-            return Notification(0, "ความชื้นต่ำ", f"แปลง {data.plot_id} มีความชื้นเพียง {data.value:.1f}%", "เร่งด่วน")
-        return None
+# ============================= Patterns and services =============================
+class DeviceFactory:
+    @staticmethod
+    def create_device(dtype: str, dev_id: str, name: str, location: str, parameter: str) -> Device:
+        if dtype.lower() == "sensor":
+            return SensorDevice(dev_id, name, location, parameter)
+        if dtype.lower() == "actuator":
+            try:
+                return ActuatorDevice(dev_id, name, location, float(parameter))
+            except (TypeError, ValueError) as error:
+                raise ValidationError("พารามิเตอร์ Actuator ต้องเป็นตัวเลข") from error
+        raise ValidationError("ประเภทอุปกรณ์ต้องเป็น Sensor หรือ Actuator")
 
 
 class NotificationCenter:
     def __init__(self) -> None:
-        self._observers: List[NotificationObserver] = []
+        self._observers: List[ISensorObserver] = []
 
-    def subscribe(self, observer: NotificationObserver) -> None:
+    def subscribe(self, observer: ISensorObserver) -> None:
         self._observers.append(observer)
 
-    def publish(self, data: SensorData) -> List[Notification]:
+    def notify(self, data: SensorData) -> List[Notification]:
         notices: List[Notification] = []
         for observer in self._observers:
             notice = observer.update(data)
@@ -489,248 +441,273 @@ class NotificationCenter:
 
 
 class FarmRepository:
-    """Repository จำลอง persistence โดยรักษาข้อมูลใน session ของ Streamlit."""
-    TABLES = ["users", "farms", "plots", "crops", "devices", "sensor_data", "irrigation_tasks", "harvest_records", "notifications", "audit_logs"]
+    TABLES = ["users", "roles", "farms", "plots", "crops", "devices", "sensor_data", "irrigation_tasks", "harvest_records", "notifications"]
 
-    def __init__(self) -> None:
+    def __init__(self, seed: bool = True) -> None:
         self._data: Dict[str, List[Any]] = {table: [] for table in self.TABLES}
-        self._sequences = {table: 0 for table in self.TABLES}
+        self._counters: Dict[str, int] = {table: 0 for table in self.TABLES}
+        if seed:
+            self.seed()
 
     def next_id(self, table: str) -> int:
-        self._sequences[table] += 1
-        return self._sequences[table]
+        self._counters[table] += 1
+        return self._counters[table]
 
-    def add(self, table: str, item: Any) -> Any:
-        self._data[table].append(item)
-        return item
+    def add(self, table: str, value: Any) -> Any:
+        self._data[table].append(value)
+        return value
 
     def all(self, table: str) -> List[Any]:
         return list(self._data[table])
 
-    def get(self, table: str, item_id: int, attr: str) -> Optional[Any]:
-        return next((item for item in self._data[table] if getattr(item, attr, None) == item_id), None)
-
-    def get_farm(self) -> Optional[Farm]:
-        farms = self.all("farms")
-        if farms:
-            return farms[0]
-        farmer = Farmer(1, "เกษตรกรตัวอย่าง", "farmer@example.com", "farm1234")
+    def seed(self) -> None:
+        farmer = Farmer(self.next_id("users"), "วีรชัย ห้อยเหม", "veerachai@example.com", "SMART-2026")
+        admin = Admin(self.next_id("users"), "ผู้ดูแลระบบ", "admin@example.com", "admin1234")
         self.add("users", farmer)
-        farm = Farm(self.next_id("farms"), "ฟาร์มบ้านสุขใจ", "เชียงใหม่", farmer.user_id)
-        farmer.assign_farm(farm)
+        self.add("users", admin)
+        self.add("roles", {"role": "เกษตรกร", "permissions": "ดูแลฟาร์ม, บันทึกผลผลิต"})
+        self.add("roles", {"role": "ผู้ดูแลระบบ", "permissions": "จัดการระบบทั้งหมด"})
+        farm = Farm(self.next_id("farms"), "สมาร์ทฟาร์ม ธนบุรี", farmer, "กรุงเทพมหานคร")
+        farmer.manage_farm(farm)
         self.add("farms", farm)
-        plot = Plot(self.next_id("plots"), "แปลงผัก A1", 120)
-        farm.add_plot(plot)
-        self.add("plots", plot)
-        crop = Crop(self.next_id("crops"), "ผักสลัด", date.today())
-        plot.add_crop(crop)
-        self.add("crops", crop)
-        return farm
+        plot_a = farm.add_plot("แปลงผักสลัด A1", 120)
+        plot_b = farm.add_plot("แปลงสตอเบอร์รี่ B1", 150)
+        self.add("plots", plot_a)
+        self.add("plots", plot_b)
+        crop_a = Crop(self.next_id("crops"), "ผักสลัด Green Oak", 65, 45)
+        crop_b = Crop(self.next_id("crops"), "สตอเบอร์รี่ พันธุ์ 80", 75, 90)
+        plot_a.plant_crop(crop_a)
+        plot_b.plant_crop(crop_b)
+        self.add("crops", crop_a)
+        self.add("crops", crop_b)
+        self.add("devices", SensorDevice("S-101", "เซนเซอร์ความชื้น A1", "แปลง A1", "ความชื้นในดิน"))
+        self.add("devices", ActuatorDevice("V-101", "วาล์วน้ำ A1", "แปลง A1", 30.5))
+        self.add("sensor_data", SensorData(self.next_id("sensor_data"), "S-101", 24, 28.5))
+        self.add("sensor_data", SensorData(self.next_id("sensor_data"), "S-102", 68.5, 27))
+        self.add("irrigation_tasks", IrrigationTask(self.next_id("irrigation_tasks"), "แปลงผักสลัด A1", 100))
+        self.add("harvest_records", HarvestRecord(self.next_id("harvest_records"), "ผักสลัด Green Oak", 150, 12000, "2026-09-10"))
+        self.add("harvest_records", HarvestRecord(self.next_id("harvest_records"), "สตอเบอร์รี่ พันธุ์ 80", 85.5, 25650, "2026-09-18"))
+        notice = LowMoistureObserver().update(self.all("sensor_data")[0])
+        if notice:
+            notice._notification_id = self.next_id("notifications")
+            self.add("notifications", notice)
 
-    def get_harvests(self) -> List[HarvestRecord]:
-        return self.all("harvest_records")
 
-    def add_harvest(self, record: HarvestRecord) -> HarvestRecord:
-        return self.add("harvest_records", record)
-
-
-class SmartFarmService:
+class FarmService:
     def __init__(self, repository: FarmRepository) -> None:
-        self.repo = repository
-        self.notifications = NotificationCenter()
-        self.notifications.subscribe(NotificationObserver())
+        self._repo = repository
+        self._center = NotificationCenter()
+        self._center.subscribe(LowMoistureObserver())
 
-    def add_farm(self, name: str, location: str, farmer: Farmer) -> Farm:
-        farm = Farm(self.repo.next_id("farms"), name, location, farmer.user_id)
-        self.repo.add("farms", farm)
-        farmer.assign_farm(farm)
-        return farm
+    @property
+    def repo(self) -> FarmRepository:
+        return self._repo
 
-    def add_plot(self, farm_id: int, name: str, area: float) -> Plot:
-        farm = self.repo.get("farms", farm_id, "farm_id")
-        if not farm:
-            raise ValidationError("ไม่พบฟาร์มที่เลือก")
-        plot = Plot(self.repo.next_id("plots"), name, area)
-        farm.add_plot(plot)
-        return self.repo.add("plots", plot)
+    def add_device(self, dtype: str, device_id: str, name: str, location: str, parameter: str) -> Device:
+        device = DeviceFactory.create_device(dtype, device_id, name, location, parameter)
+        if any(item.device_id == device.device_id for item in self._repo.all("devices")):
+            raise ValidationError("รหัสอุปกรณ์ซ้ำกัน")
+        return self._repo.add("devices", device)
 
-    def add_crop(self, plot_id: int, name: str, plant_date: date) -> Crop:
-        plot = self.repo.get("plots", plot_id, "plot_id")
-        if not plot:
-            raise ValidationError("ไม่พบแปลงที่เลือก")
-        crop = Crop(self.repo.next_id("crops"), name, plant_date)
-        plot.add_crop(crop)
-        return self.repo.add("crops", crop)
-
-    def record_sensor(self, plot_id: int, sensor_type: str, value: float) -> List[Notification]:
-        if not self.repo.get("plots", plot_id, "plot_id"):
-            raise ValidationError("ไม่พบแปลงที่เลือก")
-        record = SensorData(self.repo.next_id("sensor_data"), plot_id, sensor_type, value)
-        self.repo.add("sensor_data", record)
-        notices = self.notifications.publish(record)
+    def record_sensor(self, device_id: str, moisture: float, temp: float) -> List[Notification]:
+        if not any(device.device_id == device_id for device in self._repo.all("devices")):
+            raise ValidationError("ไม่พบอุปกรณ์เซนเซอร์")
+        data = self._repo.add("sensor_data", SensorData(self._repo.next_id("sensor_data"), device_id, moisture, temp))
+        notices = self._center.notify(data)
         for notice in notices:
-            notice._notification_id = self.repo.next_id("notifications")
-            self.repo.add("notifications", notice)
+            notice._notification_id = self._repo.next_id("notifications")
+            self._repo.add("notifications", notice)
         return notices
 
-    def create_irrigation_task(self, plot_id: int, strategy: IIrrigationStrategy, moisture: float) -> IrrigationTask:
-        plot = self.repo.get("plots", plot_id, "plot_id")
-        if not plot:
-            raise ValidationError("ไม่พบแปลงที่เลือก")
-        duration = strategy.calculate_duration(moisture, plot.area_sqm)
-        if duration == 0:
-            raise ValidationError("ความชื้นเพียงพอ ยังไม่จำเป็นต้องรดน้ำ")
-        task = IrrigationTask(self.repo.next_id("irrigation_tasks"), plot_id, duration, strategy.name)
-        return self.repo.add("irrigation_tasks", task)
+    def calculate_irrigation(self, plot_name: str, strategy: IIrrigationStrategy, current: float, target: float) -> IrrigationTask:
+        water = strategy.calculate_water(current, target)
+        if water <= 0:
+            raise ValidationError("ความชื้นถึงเป้าหมายแล้ว ยังไม่ต้องรดน้ำ")
+        task = IrrigationTask(self._repo.next_id("irrigation_tasks"), plot_name, water)
+        return self._repo.add("irrigation_tasks", task)
 
-    def add_harvest(self, crop_id: int, harvest_date: date, yield_kg: float, revenue: float) -> HarvestRecord:
-        crop = self.repo.get("crops", crop_id, "crop_id")
-        if not crop or crop.status != "กำลังปลูก":
-            raise ValidationError("เลือกได้เฉพาะพืชที่กำลังปลูก")
-        record = HarvestRecord(self.repo.next_id("harvest_records"), crop_id, crop.name, harvest_date, yield_kg, revenue)
-        crop.mark_harvested()
-        return self.repo.add("harvest_records", record)
+    def add_harvest(self, crop_name: str, yield_kg: float, revenue: float) -> HarvestRecord:
+        record = HarvestRecord(self._repo.next_id("harvest_records"), crop_name, yield_kg, revenue)
+        return self._repo.add("harvest_records", record)
 
 
-def get_service() -> SmartFarmService:
-    if "farm_service" not in st.session_state:
-        repository = FarmRepository()
-        farmer = Farmer(repository.next_id("users"), "เกษตรกรตัวอย่าง", "farmer@example.com", "farm1234")
-        repository.add("users", farmer)
-        service = SmartFarmService(repository)
-        farm = service.add_farm("ฟาร์มบ้านสุขใจ", "เชียงใหม่", farmer)
-        plot = service.add_plot(farm.farm_id, "แปลงผัก A1", 120)
-        service.add_crop(plot.plot_id, "ผักสลัด", date.today())
-        service.record_sensor(plot.plot_id, "ความชื้นในดิน", 24)
-        service.record_sensor(plot.plot_id, "อุณหภูมิ", 28.5)
-        repository.add("devices", DeviceFactory.create("เซนเซอร์ความชื้น", repository.next_id("devices"), "เซนเซอร์ A1", plot.plot_id))
-        repository.add("devices", DeviceFactory.create("วาล์วรดน้ำ", repository.next_id("devices"), "วาล์ว A1", plot.plot_id))
-        st.session_state.farm_service = service
-    return st.session_state.farm_service
+# ============================= UI helpers =============================
+def get_state() -> tuple[FarmRepository, FarmService]:
+    if "farm_repository" not in st.session_state:
+        st.session_state.farm_repository = FarmRepository()
+        st.session_state.farm_service = FarmService(st.session_state.farm_repository)
+        st.session_state.current_role = "ผู้ดูแลระบบ"
+    return st.session_state.farm_repository, st.session_state.farm_service
 
 
+def frame(table: str, rows: Iterable[Dict[str, Any]]) -> None:
+    st.dataframe(pd.DataFrame(list(rows)), use_container_width=True, hide_index=True)
+
+
+def run_tests() -> tuple[str, unittest.TestResult]:
+    repo = FarmRepository(seed=False)
+
+    class SmartFarmTests(unittest.TestCase):
+        def test_factory_polymorphism(self) -> None:
+            sensor = DeviceFactory.create_device("sensor", "S-1", "ทดสอบ", "A1", "ความชื้น")
+            actuator = DeviceFactory.create_device("actuator", "V-1", "ทดสอบ", "A1", "10")
+            self.assertIsInstance(sensor, SensorDevice)
+            self.assertIsInstance(actuator, ActuatorDevice)
+            self.assertNotEqual(sensor.execute_action(), actuator.execute_action())
+
+        def test_strategy(self) -> None:
+            self.assertEqual(MoistureBasedStrategy().calculate_water(30, 60), 75)
+            self.assertEqual(TimerBasedStrategy().calculate_water(30, 60), 15)
+
+        def test_validation(self) -> None:
+            with self.assertRaises(ValidationError):
+                Plot(1, "แปลงผิด", -1)
+            with self.assertRaises(ValidationError):
+                HarvestRecord(1, "ผัก", 0, 100)
+
+        def test_observer(self) -> None:
+            center = NotificationCenter()
+            center.subscribe(LowMoistureObserver())
+            self.assertEqual(len(center.notify(SensorData(1, "S-1", 20, 25))), 1)
+
+        def test_integration_service(self) -> None:
+            service = FarmService(repo)
+            device = service.add_device("sensor", "S-99", "เซนเซอร์", "A1", "ความชื้น")
+            self.assertEqual(device.device_id, "S-99")
+            self.assertEqual(len(service.record_sensor("S-99", 20, 25)), 1)
+
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(SmartFarmTests)
+    output = io.StringIO()
+    result = unittest.TextTestRunner(stream=output, verbosity=2).run(suite)
+    return output.getvalue(), result
+
+
+# ============================= Streamlit presentation =============================
 st.set_page_config(page_title="Smart Farm Management System", page_icon="🌱", layout="wide")
-st.markdown("""
-<style>
-.main { background: #f5f8f1; }
-[data-testid="stMetric"] { background: white; border: 1px solid #dbe7d3; padding: 14px; border-radius: 12px; }
-.block-container { padding-top: 2rem; }
-</style>
-""", unsafe_allow_html=True)
+st.markdown("""<style>
+.main { background: #f4f8f0; }
+[data-testid="stMetric"] { background: white; border: 1px solid #d9e6d0; padding: 12px; border-radius: 10px; }
+</style>""", unsafe_allow_html=True)
 
-service = get_service()
-repo = service.repo
-farmer = next((user for user in repo.all("users") if isinstance(user, Farmer)), None)
+repo, service = get_state()
+farm = repo.all("farms")[0]
+users = repo.all("users")
+role_choice = st.sidebar.selectbox("สิทธิ์การใช้งาน", ["ผู้ดูแลระบบ", "เกษตรกร"], index=0 if st.session_state.current_role == "ผู้ดูแลระบบ" else 1)
+st.session_state.current_role = role_choice
+st.sidebar.markdown(f"**ผู้ใช้งาน:** {farm.owner.username}")
+st.sidebar.markdown(f"**บทบาท:** `{role_choice}`")
+menu = st.sidebar.radio("เมนูหลัก", ["📊 Dashboard", "🧩 สถาปัตยกรรมและ Checklist", "📡 อุปกรณ์ฮาร์ดแวร์", "💧 คำนวณการรดน้ำ", "🌾 ผลผลิตและรายได้", "🌐 REST API Simulator", "🧪 Unit & Integration Testing"])
 st.title("🌱 ระบบจัดการฟาร์มอัจฉริยะ")
 st.caption("Smart Farm Management System | Full Stack OOP Project Standard")
 
-menu = ["📊 Dashboard", "🏗️ สถาปัตยกรรม OOP", "📡 จัดการอุปกรณ์ฮาร์ดแวร์", "💧 คำนวณการรดน้ำ", "📈 รายงานผลผลิตและรายได้"]
-choice = st.sidebar.radio("เมนูหลัก", menu)
-st.sidebar.info(f"ผู้ใช้งาน: {farmer.name if farmer else 'ผู้ดูแลระบบ'}\nบทบาท: เกษตรกร")
-
-
-def plot_label(plot_id: int) -> str:
-    plot = repo.get("plots", plot_id, "plot_id")
-    return f"{plot.name} ({plot.area_sqm:.0f} ตร.ม.)" if plot else "ไม่พบแปลง"
-
-
-def show_error(action: Callable[[], Any]) -> None:
-    try:
-        result = action()
-        if result is not None:
-            st.success("ดำเนินการสำเร็จ")
-    except (ValidationError, ValueError) as error:
-        st.error(str(error))
-
-
-if choice == menu[0]:
+if menu == "📊 Dashboard":
     st.header("📊 ภาพรวมฟาร์ม")
-    harvests, notices = repo.all("harvest_records"), repo.all("notifications")
-    metrics = st.columns(5)
-    metrics[0].metric("ฟาร์ม", len(repo.all("farms")))
-    metrics[1].metric("แปลงปลูก", len(repo.all("plots")))
-    metrics[2].metric("พืชกำลังปลูก", sum(c.status == "กำลังปลูก" for c in repo.all("crops")))
-    metrics[3].metric("ผลผลิตรวม", f"{sum(h.yield_kg for h in harvests):,.1f} กก.")
-    metrics[4].metric("รายได้รวม", f"{sum(h.revenue for h in harvests):,.0f} บาท")
-    st.divider()
+    harvests = repo.all("harvest_records")
+    cards = st.columns(4)
+    cards[0].metric("ฟาร์ม", len(repo.all("farms")))
+    cards[1].metric("แปลงปลูก", len(repo.all("plots")))
+    cards[2].metric("พืชกำลังปลูก", sum(c.status == "กำลังปลูก" for c in repo.all("crops")))
+    cards[3].metric("ผลผลิตสะสม", f"{sum(h.yield_kg for h in harvests):,.1f} กก.")
     left, right = st.columns(2)
     with left:
-        st.subheader("สถานะเซนเซอร์ล่าสุด")
-        sensor_rows = [{"ประเภท": d.sensor_type, "ค่า": d.value, "เวลา": d.recorded_at.strftime("%d/%m/%Y %H:%M")} for d in repo.all("sensor_data")]
-        st.dataframe(pd.DataFrame(sensor_rows), use_container_width=True, hide_index=True)
+        frame("sensor_data", [{"อุปกรณ์": s.device_id, "ความชื้น": f"{s.moisture}%", "อุณหภูมิ": f"{s.temp} °C", "เวลา": s.timestamp} for s in repo.all("sensor_data")])
     with right:
         st.subheader("🔔 การแจ้งเตือน")
-        if notices:
-            for notice in reversed(notices[-5:]):
-                st.warning(f"**{notice.title}**: {notice.message}")
-        else:
-            st.success("ไม่มีการแจ้งเตือนใหม่")
+        for notice in repo.all("notifications"):
+            st.warning(f"[{notice.created_at}] {notice.message}")
 
-elif choice == menu[1]:
-    st.header("🏗️ โครงสร้างสถาปัตยกรรม OOP")
-    st.markdown("""
-    **Domain Classes (13 คลาส):** `User`, `Farmer`, `Admin`, `Device`, `SensorDevice`, `ActuatorDevice`, `Farm`, `Plot`, `Crop`, `SensorData`, `IrrigationTask`, `HarvestRecord`, `Notification`
+elif menu == "🧩 สถาปัตยกรรมและ Checklist":
+    st.header("🧩 สถาปัตยกรรม OOP และ Full Stack Checklist")
+    st.markdown("""**Domain Classes (13 คลาส):** `User`, `Farmer`, `Admin`, `Device`, `SensorDevice`, `ActuatorDevice`, `Farm`, `Plot`, `Crop`, `SensorData`, `IrrigationTask`, `HarvestRecord`, `Notification`  
+**Patterns:** `DeviceFactory`, `MoistureBasedStrategy`, `TimerBasedStrategy`, `FarmRepository`, `NotificationCenter`  
+**ความสัมพันธ์:** Farm composition กับ Plot, Plot aggregation กับ Crop, Farmer association กับ Farm, inheritance ของ User และ Device""")
+    st.subheader("ตารางข้อมูลจำลอง 10 ตาราง")
+    frame("tables", [{"ตาราง": table, "รายการ": len(repo.all(table))} for table in FarmRepository.TABLES])
+    st.subheader("Business Rules (12 ข้อ)")
+    st.markdown("""1. ข้อมูลสำคัญต้องไม่ว่าง  
+2. อีเมลต้องมีรูปแบบถูกต้อง  
+3. รหัสอุปกรณ์ต้องไม่ซ้ำ  
+4. พื้นที่แปลงต้องมากกว่า 0  
+5. พืชในแปลงเดียวกันปลูกพร้อมกันได้หนึ่งรายการ  
+6. ความชื้นอยู่ระหว่าง 0-100%  
+7. อุณหภูมิอยู่ในช่วงที่รองรับ  
+8. ความชื้นต่ำกว่า 30% สร้าง Notification  
+9. ปริมาณน้ำต้องมากกว่า 0  
+10. ผลผลิตต้องมากกว่า 0  
+11. รายได้ต้องไม่ติดลบ  
+12. Actuator ต้องมีอัตราการไหลมากกว่า 0""")
+    st.subheader("Use Cases (12 รายการ)")
+    st.write("เข้าสู่ระบบ, สลับบทบาท, ดู Dashboard, จัดการฟาร์ม, จัดการแปลง, จัดการพืช, สร้างอุปกรณ์, รับ telemetry, คำนวณน้ำ, สร้างงานรดน้ำ, บันทึกผลผลิต, ตรวจสอบแจ้งเตือน")
 
-    **Patterns:** `DeviceFactory` สร้างอุปกรณ์ · `IIrrigationStrategy` รองรับอัลกอริทึมการรดน้ำ · `FarmRepository` จำลองตารางข้อมูล · `NotificationCenter` แจ้งเตือนผ่าน Observer
-
-    **ความสัมพันธ์:** Farm composition กับ Plot, Plot aggregation กับ Crop, Farmer association กับ Farm และ inheritance ของ User/Device
-    """)
-    st.subheader("ตารางข้อมูลจำลอง")
-    st.dataframe(pd.DataFrame({"ตาราง": FarmRepository.TABLES, "จำนวนรายการ": [len(repo.all(t)) for t in FarmRepository.TABLES]}), use_container_width=True, hide_index=True)
-    st.subheader("Business Rules ที่บังคับใช้")
-    rules = ["ชื่อข้อมูลสำคัญต้องไม่ว่าง", "รหัสต้องเป็นจำนวนเต็มบวก", "พื้นที่แปลงต้องมากกว่า 0", "พืชกำลังปลูกในแปลงเดียวกันมีได้หนึ่งรายการ", "ความชื้นอยู่ในช่วง 0-100%", "ความชื้นต่ำกว่า 30% สร้าง Notification", "ระยะเวลารดน้ำ 1-240 นาที", "ความชื้นพอไม่สร้างงานรดน้ำ", "เก็บเกี่ยวได้เฉพาะพืชที่กำลังปลูก", "ผลผลิตต้องมากกว่า 0", "รายได้ต้องไม่ติดลบ", "คำสั่ง actuator มีเพียงเปิด/ปิด"]
-    st.dataframe(pd.DataFrame({"กฎธุรกิจ": rules}), use_container_width=True, hide_index=True)
-
-elif choice == menu[2]:
-    st.header("📡 จัดการอุปกรณ์ฮาร์ดแวร์")
-    plots = repo.all("plots")
+elif menu == "📡 อุปกรณ์ฮาร์ดแวร์":
+    st.header("📡 จัดการอุปกรณ์ด้วย Factory Pattern")
     with st.form("device_form"):
-        device_type = st.selectbox("ประเภทอุปกรณ์ (Factory)", ["เซนเซอร์ความชื้น", "เซนเซอร์อุณหภูมิ", "วาล์วรดน้ำ"])
-        name = st.text_input("ชื่ออุปกรณ์", placeholder="เช่น เซนเซอร์ B2")
-        plot_id = st.selectbox("แปลงที่ติดตั้ง", [p.plot_id for p in plots], format_func=plot_label)
+        dtype = st.selectbox("ชนิดอุปกรณ์", ["Sensor", "Actuator"])
+        device_id = st.text_input("รหัสอุปกรณ์", "DEV-003")
+        name = st.text_input("ชื่ออุปกรณ์", "อุปกรณ์โซน B")
+        location = st.text_input("ตำแหน่ง", "แปลง B1")
+        parameter = st.text_input("ประเภทเซนเซอร์ / อัตราการไหล", "ความชื้นในดิน" if dtype == "Sensor" else "30.5")
         submitted = st.form_submit_button("สร้างอุปกรณ์")
     if submitted:
-        show_error(lambda: repo.add("devices", DeviceFactory.create(device_type, repo.next_id("devices"), name, plot_id)))
-    rows = [{"รหัส": d.device_id, "ชื่อ": d.name, "ประเภท": getattr(d, "sensor_type", getattr(d, "actuator_type", "-")), "สถานะ": getattr(d, "state", "ออนไลน์"), "การทำงาน": d.execute_action("ตรวจสอบ") if isinstance(d, SensorDevice) else d.state} for d in repo.all("devices")]
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        try:
+            device = service.add_device(dtype, device_id, name, location, parameter)
+            st.success(device.execute_action())
+        except (ValidationError, ValueError) as error:
+            st.error(f"Validation Error: {error}")
+    rows = []
+    for device in repo.all("devices"):
+        if isinstance(device, SensorDevice):
+            device_type, state, action = device.sensor_type, "ออนไลน์" if device.is_active else "ออฟไลน์", device.execute_action()
+        else:
+            device_type, state, action = device.__class__.__name__, device.state, device.execute_action()
+        rows.append({"รหัส": device.device_id, "ชื่อ": device.name, "ประเภท": device_type, "ตำแหน่ง": device.location, "สถานะ": state, "การทำงาน": action})
+    frame("devices", rows)
 
-elif choice == menu[3]:
-    st.header("💧 ระบบคำนวณการรดน้ำ")
-    plots = repo.all("plots")
-    with st.form("irrigation_form"):
-        plot_id = st.selectbox("เลือกแปลง", [p.plot_id for p in plots], format_func=plot_label)
-        strategy_name = st.radio("กลยุทธ์ (Strategy)", ["ตามความชื้น", "ตามเวลา"], horizontal=True)
-        moisture = st.number_input("ความชื้นปัจจุบัน (%)", min_value=0.0, max_value=100.0, value=24.0)
-        submitted = st.form_submit_button("คำนวณและสร้างงานรดน้ำ")
+elif menu == "💧 คำนวณการรดน้ำ":
+    st.header("💧 คำนวณการรดน้ำด้วย Strategy Pattern")
+    plot_names = [plot.name for plot in farm.plots]
+    plot_name = st.selectbox("เลือกแปลง", plot_names)
+    current = st.number_input("ความชื้นปัจจุบัน (%)", 0.0, 100.0, 25.0)
+    target = st.number_input("ความชื้นเป้าหมาย (%)", 0.0, 100.0, 65.0)
+    strategy_name = st.radio("กลยุทธ์", ["ตามความชื้น", "ตามเวลาคงที่"])
+    if st.button("คำนวณและสร้างงาน"):
+        try:
+            strategy = MoistureBasedStrategy() if strategy_name == "ตามความชื้น" else TimerBasedStrategy()
+            task = service.calculate_irrigation(plot_name, strategy, current, target)
+            st.success(f"ต้องใช้น้ำ {task.water_amount:,.2f} ลิตร")
+        except ValidationError as error:
+            st.warning(str(error))
+    frame("irrigation_tasks", [{"แปลง": t.plot_name, "น้ำ (ลิตร)": t.water_amount, "สถานะ": t.status} for t in repo.all("irrigation_tasks")])
+
+elif menu == "🌾 ผลผลิตและรายได้":
+    st.header("🌾 รายงานผลผลิตและรายได้")
+    with st.form("harvest_form"):
+        crop_name = st.text_input("ชื่อพืช", "ผักสลัด Green Oak")
+        yield_kg = st.number_input("ผลผลิต (กก.)", min_value=0.0, value=50.0)
+        revenue = st.number_input("รายได้ (บาท)", min_value=0.0, value=4000.0)
+        submitted = st.form_submit_button("บันทึกผลผลิต")
     if submitted:
-        strategy = MoistureBasedStrategy() if strategy_name == "ตามความชื้น" else TimerBasedStrategy()
-        show_error(lambda: service.create_irrigation_task(plot_id, strategy, moisture))
-    tasks = [{"แปลง": plot_label(t.plot_id), "กลยุทธ์": t.mode, "ระยะเวลา (นาที)": t.duration_minutes, "สถานะ": t.status} for t in repo.all("irrigation_tasks")]
-    st.dataframe(pd.DataFrame(tasks), use_container_width=True, hide_index=True)
+        try:
+            service.add_harvest(crop_name, yield_kg, revenue)
+            st.success("บันทึกผลผลิตสำเร็จ")
+        except ValidationError as error:
+            st.error(str(error))
+    frame("harvest_records", [{"รหัส": h.record_id, "พืช": h.crop_name, "ผลผลิต (กก.)": h.yield_kg, "รายได้ (บาท)": h.revenue, "วันที่": h.harvest_date} for h in repo.all("harvest_records")])
+    st.metric("รายได้รวม", f"{sum(h.revenue for h in repo.all('harvest_records')):,.2f} บาท")
+
+elif menu == "🌐 REST API Simulator":
+    st.header("🌐 REST API Endpoints Simulator")
+    endpoints = [("POST", "/api/v1/auth/login", "เข้าสู่ระบบ"), ("POST", "/api/v1/auth/register", "สมัครสมาชิก"), ("GET", "/api/v1/users/me", "โปรไฟล์"), ("GET", "/api/v1/roles", "บทบาท"), ("GET", "/api/v1/farms", "รายการฟาร์ม"), ("POST", "/api/v1/farms", "สร้างฟาร์ม"), ("GET", "/api/v1/farms/{id}", "ฟาร์มตามรหัส"), ("PUT", "/api/v1/farms/{id}", "แก้ไขฟาร์ม"), ("DELETE", "/api/v1/farms/{id}", "ลบฟาร์ม"), ("GET", "/api/v1/plots", "รายการแปลง"), ("POST", "/api/v1/plots", "สร้างแปลง"), ("PUT", "/api/v1/plots/{id}", "แก้ไขแปลง"), ("GET", "/api/v1/crops", "รายการพืช"), ("POST", "/api/v1/crops", "สร้างพืช"), ("GET", "/api/v1/devices", "รายการอุปกรณ์"), ("POST", "/api/v1/devices", "ลงทะเบียนอุปกรณ์"), ("POST", "/api/v1/sensors/telemetry", "รับค่าเซนเซอร์"), ("GET", "/api/v1/sensors/{id}/history", "ประวัติเซนเซอร์"), ("POST", "/api/v1/irrigation/trigger", "สั่งรดน้ำ"), ("GET", "/api/v1/irrigation/logs", "ประวัติรดน้ำ"), ("POST", "/api/v1/harvests", "บันทึกผลผลิต"), ("GET", "/api/v1/harvests/reports", "รายงานผลผลิต")]
+    frame("api", [{"Method": method, "Endpoint": path, "คำอธิบาย": description} for method, path, description in endpoints])
+    st.success(f"จำลองทั้งหมด {len(endpoints)} endpoints")
 
 else:
-    st.header("📈 รายงานผลผลิตและรายได้")
-    crops = repo.all("crops")
-    with st.form("harvest_form"):
-        available = [c for c in crops if c.status == "กำลังปลูก"]
-        if available:
-            crop_id = st.selectbox("พืชที่เก็บเกี่ยว", [c.crop_id for c in available], format_func=lambda cid: next(c.name for c in available if c.crop_id == cid))
-            harvest_date = st.date_input("วันที่เก็บเกี่ยว", date.today())
-            yield_kg = st.number_input("ผลผลิต (กิโลกรัม)", min_value=0.0, step=0.1)
-            revenue = st.number_input("รายได้ (บาท)", min_value=0.0, step=100.0)
-            submitted = st.form_submit_button("บันทึกผลผลิต")
-            if submitted:
-                show_error(lambda: service.add_harvest(crop_id, harvest_date, yield_kg, revenue))
+    st.header("🧪 Unit & Integration Testing Suite")
+    st.write("ทดสอบ Domain Classes, Design Patterns, Validation และการทำงานร่วมกันของ Service")
+    if st.button("🚀 รันการทดสอบทั้งหมด"):
+        output, result = run_tests()
+        st.code(output)
+        if result.wasSuccessful():
+            st.success(f"ผ่านทั้งหมด {result.testsRun} tests")
         else:
-            st.info("ไม่มีพืชที่พร้อมเก็บเกี่ยว")
-    records = repo.all("harvest_records")
-    if records:
-        df = pd.DataFrame([{"วันที่": h.harvest_date, "พืช": h.crop_name, "ผลผลิต (กก.)": h.yield_kg, "รายได้ (บาท)": h.revenue} for h in records])
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        chart_col, summary_col = st.columns(2)
-        with chart_col:
-            st.plotly_chart(px.bar(df, x="พืช", y="รายได้ (บาท)", color="พืช", title="รายได้แยกตามพืช"), use_container_width=True)
-        with summary_col:
-            st.plotly_chart(px.pie(df, names="พืช", values="ผลผลิต (กก.)", title="สัดส่วนผลผลิต"), use_container_width=True)
-    else:
-        st.info("ยังไม่มีข้อมูลการเก็บเกี่ยว")
+            st.error(f"ไม่ผ่าน {len(result.failures) + len(result.errors)} tests")
