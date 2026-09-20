@@ -17,7 +17,7 @@ class ValidationError(ValueError):
     """ข้อมูลนำเข้าไม่ผ่านกฎธุรกิจ"""
 
 
-class User:
+class User(ABC):
     def __init__(self, user_id: int, username: str, email: str, password: str, role: str) -> None:
         if user_id <= 0 or not username.strip() or "@" not in email:
             raise ValidationError("ข้อมูลผู้ใช้ไม่ถูกต้อง")
@@ -28,6 +28,7 @@ class User:
         self._email = email.strip().lower()
         self._password_hash = hashlib.sha256(password.encode()).hexdigest()
         self._role = role
+        self._is_active = True
 
     @property
     def user_id(self) -> int:
@@ -57,8 +58,22 @@ class User:
     def role(self) -> str:
         return self._role
 
+    @property
+    def is_active(self) -> bool:
+        return self._is_active
+
+    def deactivate(self) -> None:
+        self._is_active = False
+
+    def activate(self) -> None:
+        self._is_active = True
+
+    @abstractmethod
+    def get_permissions(self) -> List[str]:
+        raise NotImplementedError
+
     def authenticate(self, password: str) -> bool:
-        return self._password_hash == hashlib.sha256(password.encode()).hexdigest()
+        return self._is_active and self._password_hash == hashlib.sha256(password.encode()).hexdigest()
 
 
 class Farmer(User):
@@ -79,6 +94,9 @@ class Farmer(User):
         if farm not in self._farms:
             self._farms.append(farm)
 
+    def get_permissions(self) -> List[str]:
+        return ["ดู Dashboard", "จัดการฟาร์ม", "จัดการอุปกรณ์", "คำนวณการรดน้ำ", "บันทึกผลผลิต"]
+
 
 class Admin(User):
     def __init__(self, user_id: int, username: str, email: str, password: str, admin_level: int = 1) -> None:
@@ -90,6 +108,18 @@ class Admin(User):
     @property
     def admin_level(self) -> int:
         return self._admin_level
+
+    def get_permissions(self) -> List[str]:
+        return ["ดู Dashboard", "จัดการฟาร์ม", "จัดการอุปกรณ์", "คำนวณการรดน้ำ", "จัดการผู้ใช้งาน", "บันทึกผลผลิต", "ดู API", "รันการทดสอบ"]
+
+
+class SuperAdmin(Admin):
+    def __init__(self, user_id: int, username: str, email: str, password: str) -> None:
+        User.__init__(self, user_id, username, email, password, "ซูเปอร์แอดมิน")
+        self._admin_level = 99
+
+    def get_permissions(self) -> List[str]:
+        return ["สิทธิ์ทั้งหมด", "จัดการผู้ใช้งาน", "กำหนดสิทธิ์", "ลบผู้ใช้งาน", "ดู API", "รันการทดสอบ"]
 
 
 class Device(ABC):
@@ -440,6 +470,97 @@ class NotificationCenter:
         return notices
 
 
+class UserRepository:
+    """Repository สำหรับ CRUD ผู้ใช้งานและการกำหนดสิทธิ์"""
+
+    ROLE_TYPES = {"เกษตรกร": Farmer, "ผู้ดูแลระบบ": Admin, "ซูเปอร์แอดมิน": SuperAdmin}
+
+    def __init__(self) -> None:
+        self._users: List[User] = []
+        self._next_id = 1
+
+    def add(self, username: str, email: str, password: str, role: str) -> User:
+        if role not in self.ROLE_TYPES:
+            raise ValidationError("บทบาทผู้ใช้งานไม่ถูกต้อง")
+        if any(user.email == email.strip().lower() for user in self._users):
+            raise ValidationError("อีเมลนี้มีอยู่ในระบบแล้ว")
+        user_class = self.ROLE_TYPES[role]
+        if user_class is Farmer:
+            user = Farmer(self._next_id, username, email, password)
+        elif user_class is Admin:
+            user = Admin(self._next_id, username, email, password)
+        else:
+            user = SuperAdmin(self._next_id, username, email, password)
+        self._users.append(user)
+        self._next_id += 1
+        return user
+
+    def add_existing(self, user: User) -> User:
+        self._users.append(user)
+        self._next_id = max(self._next_id, user.user_id + 1)
+        return user
+
+    def all(self) -> List[User]:
+        return list(self._users)
+
+    def get(self, user_id: int) -> Optional[User]:
+        return next((user for user in self._users if user.user_id == user_id), None)
+
+    def find(self, keyword: str) -> List[User]:
+        term = keyword.strip().lower()
+        return [user for user in self._users if term in user.username.lower() or term in user.email]
+
+    def update(self, user_id: int, username: str, email: str, role: str) -> User:
+        current = self.get(user_id)
+        if current is None:
+            raise ValidationError("ไม่พบผู้ใช้งานที่เลือก")
+        normalized_email = email.strip().lower()
+        if any(user.user_id != user_id and user.email == normalized_email for user in self._users):
+            raise ValidationError("อีเมลนี้มีอยู่ในระบบแล้ว")
+        current.username = username
+        current.email = normalized_email
+        if current.role != role:
+            replacement = self._replace_role(current, role)
+            self._users[self._users.index(current)] = replacement
+            current = replacement
+        return current
+
+    def _replace_role(self, current: User, role: str) -> User:
+        if role not in self.ROLE_TYPES:
+            raise ValidationError("บทบาทผู้ใช้งานไม่ถูกต้อง")
+        user_class = self.ROLE_TYPES[role]
+        if user_class is Farmer:
+            replacement = Farmer(current.user_id, current.username, "user@example.com", "temp")
+        elif user_class is Admin:
+            replacement = Admin(current.user_id, current.username, "user@example.com", "temp")
+        else:
+            replacement = SuperAdmin(current.user_id, current.username, "user@example.com", "temp")
+        replacement._email = current.email
+        replacement._password_hash = current._password_hash
+        replacement._is_active = current.is_active
+        return replacement
+
+    def deactivate(self, user_id: int) -> User:
+        user = self.get(user_id)
+        if user is None:
+            raise ValidationError("ไม่พบผู้ใช้งานที่เลือก")
+        user.deactivate()
+        return user
+
+    def activate(self, user_id: int) -> User:
+        user = self.get(user_id)
+        if user is None:
+            raise ValidationError("ไม่พบผู้ใช้งานที่เลือก")
+        user.activate()
+        return user
+
+    def delete(self, user_id: int) -> None:
+        user = self.get(user_id)
+        if user is None:
+            raise ValidationError("ไม่พบผู้ใช้งานที่เลือก")
+        self._users.remove(user)
+
+
 class FarmRepository:
     TABLES = ["users", "roles", "farms", "plots", "crops", "devices", "sensor_data", "irrigation_tasks", "harvest_records", "notifications"]
 
@@ -463,8 +584,10 @@ class FarmRepository:
     def seed(self) -> None:
         farmer = Farmer(self.next_id("users"), "วีรชัย ห้อยเหม", "veerachai@example.com", "SMART-2026")
         admin = Admin(self.next_id("users"), "ผู้ดูแลระบบ", "admin@example.com", "admin1234")
+        super_admin = SuperAdmin(self.next_id("users"), "ซูเปอร์แอดมิน", "superadmin@example.com", "super1234")
         self.add("users", farmer)
         self.add("users", admin)
+        self.add("users", super_admin)
         self.add("roles", {"role": "เกษตรกร", "permissions": "ดูแลฟาร์ม, บันทึกผลผลิต"})
         self.add("roles", {"role": "ผู้ดูแลระบบ", "permissions": "จัดการระบบทั้งหมด"})
         farm = Farm(self.next_id("farms"), "สมาร์ทฟาร์ม ธนบุรี", farmer, "กรุงเทพมหานคร")
@@ -532,12 +655,17 @@ class FarmService:
 
 
 # ============================= UI helpers =============================
-def get_state() -> tuple[FarmRepository, FarmService]:
+def get_state() -> tuple[FarmRepository, FarmService, UserRepository]:
     if "farm_repository" not in st.session_state:
         st.session_state.farm_repository = FarmRepository()
         st.session_state.farm_service = FarmService(st.session_state.farm_repository)
-        st.session_state.current_role = "ผู้ดูแลระบบ"
-    return st.session_state.farm_repository, st.session_state.farm_service
+    if "user_repository" not in st.session_state:
+        st.session_state.user_repository = UserRepository()
+        for user in st.session_state.farm_repository.all("users"):
+            st.session_state.user_repository.add_existing(user)
+    if "current_user_id" not in st.session_state:
+        st.session_state.current_user_id = 3
+    return st.session_state.farm_repository, st.session_state.farm_service, st.session_state.user_repository
 
 
 def frame(table: str, rows: Iterable[Dict[str, Any]]) -> None:
@@ -548,6 +676,22 @@ def run_tests() -> tuple[str, unittest.TestResult]:
     repo = FarmRepository(seed=False)
 
     class SmartFarmTests(unittest.TestCase):
+        def test_user_permissions_and_crud(self) -> None:
+            users = UserRepository()
+            farmer = users.add("ชาวสวน", "farmer@test.com", "1234", "เกษตรกร")
+            self.assertIsInstance(farmer, Farmer)
+            self.assertIn("บันทึกผลผลิต", farmer.get_permissions())
+            users.update(farmer.user_id, "ชาวสวนใหม่", "farmer2@test.com", "ผู้ดูแลระบบ")
+            self.assertIsInstance(users.get(farmer.user_id), Admin)
+            users.deactivate(farmer.user_id)
+            self.assertFalse(users.get(farmer.user_id).is_active)
+            users.delete(farmer.user_id)
+            self.assertIsNone(users.get(farmer.user_id))
+
+        def test_super_admin_permissions(self) -> None:
+            super_admin = SuperAdmin(1, "root", "root@test.com", "1234")
+            self.assertIn("สิทธิ์ทั้งหมด", super_admin.get_permissions())
+
         def test_factory_polymorphism(self) -> None:
             sensor = DeviceFactory.create_device("sensor", "S-1", "ทดสอบ", "A1", "ความชื้น")
             actuator = DeviceFactory.create_device("actuator", "V-1", "ทดสอบ", "A1", "10")
@@ -589,14 +733,20 @@ st.markdown("""<style>
 [data-testid="stMetric"] { background: white; border: 1px solid #d9e6d0; padding: 12px; border-radius: 10px; }
 </style>""", unsafe_allow_html=True)
 
-repo, service = get_state()
+repo, service, user_repo = get_state()
 farm = repo.all("farms")[0]
-users = repo.all("users")
-role_choice = st.sidebar.selectbox("สิทธิ์การใช้งาน", ["ผู้ดูแลระบบ", "เกษตรกร"], index=0 if st.session_state.current_role == "ผู้ดูแลระบบ" else 1)
-st.session_state.current_role = role_choice
-st.sidebar.markdown(f"**ผู้ใช้งาน:** {farm.owner.username}")
-st.sidebar.markdown(f"**บทบาท:** `{role_choice}`")
-menu = st.sidebar.radio("เมนูหลัก", ["📊 Dashboard", "🧩 สถาปัตยกรรมและ Checklist", "📡 อุปกรณ์ฮาร์ดแวร์", "💧 คำนวณการรดน้ำ", "🌾 ผลผลิตและรายได้", "🌐 REST API Simulator", "🧪 Unit & Integration Testing"])
+users = user_repo.all()
+user_labels = {user.user_id: f"{user.username} ({user.role})" for user in users}
+selected_id = st.sidebar.selectbox("ผู้ใช้จำลอง (Authentication)", list(user_labels), format_func=lambda value: user_labels[value], index=0)
+st.session_state.current_user_id = selected_id
+current_user = user_repo.get(selected_id)
+st.sidebar.markdown(f"**ผู้ใช้งาน:** {current_user.username if current_user else '-'}")
+st.sidebar.markdown(f"**บทบาท:** `{current_user.role if current_user else '-'}`")
+st.sidebar.markdown("**สิทธิ์:** " + ", ".join(current_user.get_permissions()) if current_user else "")
+all_menus = ["📊 Dashboard", "🧩 สถาปัตยกรรมและ Checklist", "👥 จัดการผู้ใช้งาน", "📡 อุปกรณ์ฮาร์ดแวร์", "💧 คำนวณการรดน้ำ", "🌾 ผลผลิตและรายได้", "🌐 REST API Simulator", "🧪 Unit & Integration Testing"]
+restricted = {"👥 จัดการผู้ใช้งาน", "🌐 REST API Simulator", "🧪 Unit & Integration Testing"}
+allowed_menus = [item for item in all_menus if item not in restricted or (current_user and current_user.role in {"ผู้ดูแลระบบ", "ซูเปอร์แอดมิน"})]
+menu = st.sidebar.radio("เมนูหลัก", allowed_menus)
 st.title("🌱 ระบบจัดการฟาร์มอัจฉริยะ")
 st.caption("Smart Farm Management System | Full Stack OOP Project Standard")
 
@@ -639,6 +789,69 @@ elif menu == "🧩 สถาปัตยกรรมและ Checklist":
     st.subheader("Use Cases (12 รายการ)")
     st.write("เข้าสู่ระบบ, สลับบทบาท, ดู Dashboard, จัดการฟาร์ม, จัดการแปลง, จัดการพืช, สร้างอุปกรณ์, รับ telemetry, คำนวณน้ำ, สร้างงานรดน้ำ, บันทึกผลผลิต, ตรวจสอบแจ้งเตือน")
 
+elif menu == "👥 จัดการผู้ใช้งาน":
+    st.header("👥 จัดการผู้ใช้งาน (User Management System)")
+    if not current_user or current_user.role not in {"ผู้ดูแลระบบ", "ซูเปอร์แอดมิน"}:
+        st.error("คุณไม่มีสิทธิ์เข้าถึงเมนูนี้")
+    else:
+        st.subheader("📋 รายชื่อผู้ใช้งานทั้งหมด")
+        frame("users", [{
+            "ID": user.user_id,
+            "Username": user.username,
+            "Email": user.email,
+            "Role": user.role,
+            "สิทธิ์การใช้งาน": ", ".join(user.get_permissions()),
+            "สถานะ": "ใช้งานอยู่" if user.is_active else "ปิดใช้งาน",
+        } for user in user_repo.all()])
+        create_tab, update_tab, account_tab = st.tabs(["➕ สร้างผู้ใช้ใหม่", "✏️ แก้ไขผู้ใช้และสิทธิ์", "🗑️ จัดการสถานะบัญชี"])
+        with create_tab:
+            with st.form("create_user_form"):
+                new_username = st.text_input("Username")
+                new_email = st.text_input("Email")
+                new_password = st.text_input("รหัสผ่าน", type="password")
+                new_role = st.selectbox("ระดับสิทธิ์", list(UserRepository.ROLE_TYPES))
+                create_submitted = st.form_submit_button("สร้างผู้ใช้งาน")
+            if create_submitted:
+                try:
+                    user_repo.add(new_username, new_email, new_password, new_role)
+                    st.success("สร้างผู้ใช้งานสำเร็จ")
+                    st.rerun()
+                except (ValidationError, ValueError) as error:
+                    st.error(f"ไม่สามารถสร้างผู้ใช้: {error}")
+        with update_tab:
+            editable_users = user_repo.all()
+            edit_id = st.selectbox("เลือกผู้ใช้", [user.user_id for user in editable_users], format_func=lambda value: user_labels.get(value, f"ผู้ใช้ {value}"))
+            edit_user = user_repo.get(edit_id)
+            with st.form("update_user_form"):
+                edit_username = st.text_input("Username ใหม่", value=edit_user.username if edit_user else "")
+                edit_email = st.text_input("Email ใหม่", value=edit_user.email if edit_user else "")
+                edit_role = st.selectbox("บทบาทใหม่", list(UserRepository.ROLE_TYPES), index=list(UserRepository.ROLE_TYPES).index(edit_user.role) if edit_user and edit_user.role in UserRepository.ROLE_TYPES else 0)
+                update_submitted = st.form_submit_button("บันทึกการแก้ไข")
+            if update_submitted:
+                try:
+                    user_repo.update(edit_id, edit_username, edit_email, edit_role)
+                    st.success("อัปเดตข้อมูลและสิทธิ์สำเร็จ")
+                    st.rerun()
+                except (ValidationError, ValueError) as error:
+                    st.error(f"ไม่สามารถอัปเดตผู้ใช้: {error}")
+        with account_tab:
+            action_id = st.selectbox("เลือกบัญชี", [user.user_id for user in user_repo.all()], format_func=lambda value: user_labels.get(value, f"ผู้ใช้ {value}"))
+            action = st.radio("การทำงาน", ["ปิดการใช้งาน", "เปิดใช้งาน", "ลบถาวร"], horizontal=True)
+            if st.button("ยืนยันการเปลี่ยนแปลงบัญชี"):
+                try:
+                    if action == "ปิดการใช้งาน":
+                        user_repo.deactivate(action_id)
+                    elif action == "เปิดใช้งาน":
+                        user_repo.activate(action_id)
+                    else:
+                        if action_id == current_user.user_id:
+                            raise ValidationError("ไม่สามารถลบบัญชีที่กำลังใช้งานอยู่")
+                        user_repo.delete(action_id)
+                    st.success("ดำเนินการกับบัญชีสำเร็จ")
+                    st.rerun()
+                except (ValidationError, ValueError) as error:
+                    st.error(f"ไม่สามารถดำเนินการ: {error}")
+
 elif menu == "📡 อุปกรณ์ฮาร์ดแวร์":
     st.header("📡 จัดการอุปกรณ์ด้วย Factory Pattern")
     with st.form("device_form"):
@@ -658,8 +871,10 @@ elif menu == "📡 อุปกรณ์ฮาร์ดแวร์":
     for device in repo.all("devices"):
         if isinstance(device, SensorDevice):
             device_type, state, action = device.sensor_type, "ออนไลน์" if device.is_active else "ออฟไลน์", device.execute_action()
+        elif isinstance(device, ActuatorDevice):
+            device_type, state, action = "วาล์วน้ำ", device.state, device.execute_action()
         else:
-            device_type, state, action = device.__class__.__name__, device.state, device.execute_action()
+            device_type, state, action = "อุปกรณ์ทั่วไป", "ออนไลน์" if device.is_active else "ออฟไลน์", device.execute_action()
         rows.append({"รหัส": device.device_id, "ชื่อ": device.name, "ประเภท": device_type, "ตำแหน่ง": device.location, "สถานะ": state, "การทำงาน": action})
     frame("devices", rows)
 
