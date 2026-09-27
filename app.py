@@ -12,7 +12,7 @@ import unittest
 
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageDraw
+from PIL import Image, ImageOps
 
 
 # ============================= Domain and contracts =============================
@@ -252,51 +252,12 @@ class DurianVisionAnalyzer:
         return {"fruit_count": fruit_counts.get(camera.device_id, 12), "alerts": alerts}
 
 
-def create_durian_feed(camera: CCTVCamera, frame_number: int = 0, night_vision: Optional[bool] = None) -> bytes:
-    width, height = 1280, 720
-    night = camera.night_vision if night_vision is None else night_vision
-    sky_top = (9, 28, 24) if night else (105, 177, 191)
-    sky_bottom = (37, 79, 47) if night else (215, 211, 157)
-    image = Image.new("RGB", (width, height))
-    draw = ImageDraw.Draw(image)
-    for y in range(height):
-        blend = y / (height - 1)
-        color = tuple(int(sky_top[channel] * (1 - blend) + sky_bottom[channel] * blend) for channel in range(3))
-        draw.line((0, y, width, y), fill=color)
-
-    rng = random.Random(f"{camera.device_id}:{frame_number}")
-    draw.ellipse((900, 65, 1040, 205), fill=(134, 173, 103) if not night else (66, 128, 83))
-    draw.polygon([(0, 450), (235, 280), (470, 450)], fill=(80, 128, 77) if not night else (35, 94, 64))
-    draw.polygon([(440, 460), (780, 260), (1120, 470)], fill=(64, 111, 69) if not night else (29, 78, 53))
-    draw.rectangle((0, 500, width, height), fill=(83, 112, 52) if not night else (22, 70, 42))
-    draw.polygon([(480, 720), (700, 480), (790, 480), (1080, 720)], fill=(163, 147, 105) if not night else (66, 91, 60))
-
-    for index, center_x in enumerate(range(-40, width + 80, 205)):
-        base_y = 540 + rng.randint(-20, 18)
-        trunk_color = (92, 66, 42) if not night else (48, 80, 53)
-        leaf_base = (31, 91 + rng.randint(0, 25), 47) if not night else (25, 104, 67)
-        draw.polygon([(center_x - 24, base_y), (center_x - 13, 335), (center_x + 11, 335), (center_x + 28, base_y)], fill=trunk_color)
-        for _ in range(20):
-            leaf_x = center_x + rng.randint(-112, 112)
-            leaf_y = 285 + rng.randint(-82, 100)
-            radius = rng.randint(30, 65)
-            leaf_color = tuple(max(0, min(255, value + rng.randint(-18, 18))) for value in leaf_base)
-            draw.ellipse((leaf_x - radius, leaf_y - radius, leaf_x + radius, leaf_y + radius), fill=leaf_color)
-        if index % 2 == 0:
-            for fruit_index in range(2):
-                fruit_x = center_x + rng.randint(-62, 62)
-                fruit_y = 395 + fruit_index * 48 + rng.randint(-12, 12)
-                draw.line((fruit_x, fruit_y - 45, fruit_x, fruit_y - 5), fill=(90, 74, 39) if not night else (79, 116, 69), width=5)
-                draw.ellipse((fruit_x - 19, fruit_y - 10, fruit_x + 19, fruit_y + 43), fill=(105, 117, 49) if not night else (66, 135, 72), outline=(43, 73, 35) if not night else (24, 81, 47), width=2)
-                for thorn_y in range(fruit_y, fruit_y + 39, 10):
-                    draw.polygon([(fruit_x - 17, thorn_y), (fruit_x - 25, thorn_y + 5), (fruit_x - 14, thorn_y + 8)], fill=(68, 83, 37) if not night else (40, 105, 58))
-                    draw.polygon([(fruit_x + 17, thorn_y), (fruit_x + 25, thorn_y + 5), (fruit_x + 14, thorn_y + 8)], fill=(68, 83, 37) if not night else (40, 105, 58))
-
-    draw.rectangle((24, 24, 460, 104), fill=(7, 23, 22))
-    draw.text((42, 40), f"LIVE SIMULATION  |  {camera.device_id}", fill=(125, 236, 174) if night else (236, 248, 226))
-    draw.text((42, 70), f"DURIAN ORCHARD  |  FRAME {frame_number:04d}", fill=(125, 236, 174) if night else (236, 248, 226))
-    output = io.BytesIO()
-    image.save(output, format="JPEG", quality=92)
+def apply_night_vision(image_bytes: bytes) -> bytes:
+    with Image.open(io.BytesIO(image_bytes)) as source:
+        grayscale = ImageOps.grayscale(source)
+        night_image = ImageOps.colorize(grayscale, black="#071910", white="#a5edaf")
+        output = io.BytesIO()
+        night_image.save(output, format="JPEG", quality=92)
     return output.getvalue()
 
 
@@ -978,16 +939,18 @@ def run_tests() -> tuple[str, unittest.TestResult]:
             for camera_id, camera_name, _ in DURIAN_CAMERA_PRESETS:
                 self.assertEqual(seeded_cameras[camera_id], camera_name)
 
-        def test_durian_vision_and_feed(self) -> None:
+        def test_durian_vision_and_night_vision_filter(self) -> None:
             camera = CCTVCamera("CAM-DR02", "โซน B", "สวนทุเรียน · โซน B")
             result = DurianVisionAnalyzer().analyze(camera)
             self.assertEqual(result["fruit_count"], 18)
             self.assertEqual({alert[0] for alert in result["alerts"]}, {"โรคใบติด", "หนอนเจาะลูกทุเรียน"})
-            image_bytes = create_durian_feed(camera)
-            night_image_bytes = create_durian_feed(camera, night_vision=True)
-            self.assertNotEqual(image_bytes, night_image_bytes)
-            with Image.open(io.BytesIO(image_bytes)) as image:
-                self.assertEqual(image.size, (1280, 720))
+            sample = io.BytesIO()
+            Image.new("RGB", (16, 16), (150, 170, 120)).save(sample, format="PNG")
+            day_image_bytes = sample.getvalue()
+            night_image_bytes = apply_night_vision(day_image_bytes)
+            self.assertNotEqual(day_image_bytes, night_image_bytes)
+            with Image.open(io.BytesIO(night_image_bytes)) as image:
+                self.assertEqual(image.size, (16, 16))
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(SmartFarmTests)
     output = io.StringIO()
@@ -1050,36 +1013,36 @@ elif menu == "📹 กล้องวงจรปิด":
         night_key = f"night_{camera.device_id}"
         night_vision = st.toggle("Night Vision", value=camera.night_vision, key=night_key)
         camera.set_night_vision(night_vision)
-        frame_key = f"durian_frame_{camera.device_id}"
-        if frame_key not in st.session_state:
-            st.session_state[frame_key] = 1
         snapshot_count_key = f"snapshot_count_{camera.device_id}"
         if snapshot_count_key not in st.session_state:
             st.session_state[snapshot_count_key] = 0
         with st.expander("ตั้งค่า Stream URL ภายนอก (ไม่บังคับ)"):
-            stream_url = st.text_input("HTTP/HLS URL", value=camera.stream_url, key=f"stream_{camera.device_id}", placeholder="เว้นว่างเพื่อใช้ภาพสวนทุเรียนจำลอง")
+            stream_url = st.text_input("HTTP/HLS URL", value=camera.stream_url, key=f"stream_{camera.device_id}", placeholder="วาง URL สตรีมกล้อง")
             camera.set_stream_url(stream_url)
-
-        if st.button("อัปเดตเฟรมสด", icon="🔄", key=f"refresh_feed_{camera.device_id}"):
-            st.session_state[frame_key] += 1
+        uploaded_image = st.file_uploader("เพิ่มภาพจากกล้อง", type=["png", "jpg", "jpeg"], key=f"camera_image_{camera.device_id}")
+        feed_bytes = uploaded_image.getvalue() if uploaded_image else None
+        feed_mime = uploaded_image.type if uploaded_image else "image/jpeg"
+        if feed_bytes and night_vision:
+            feed_bytes = apply_night_vision(feed_bytes)
+            feed_mime = "image/jpeg"
         if camera.stream_url:
             st.video(camera.stream_url)
-            feed_bytes = create_durian_feed(camera, st.session_state[frame_key], night_vision)
-            st.caption("ภาพประกอบ Snapshot จำลอง · สตรีมภายนอกแสดงอยู่ด้านบน")
-        else:
-            feed_bytes = create_durian_feed(camera, st.session_state[frame_key], night_vision)
-            vision_mode = "NIGHT VISION" if night_vision else "DAY MODE"
-            st.image(feed_bytes, caption=f"LIVE SIMULATION · {camera.device_id} · {vision_mode} · เฟรม {st.session_state[frame_key]}", width="stretch")
+        if feed_bytes:
+            st.image(feed_bytes, caption=f"ภาพกล้อง {camera.device_id}" + (" · Night Vision" if night_vision else ""), width="stretch")
+        elif not camera.stream_url:
+            st.info("ยังไม่มีภาพกล้อง เพิ่มภาพเมื่อพร้อมได้ที่ช่องด้านบน")
 
-        if st.button("บันทึก Snapshot", icon="📸", key=f"capture_{camera.device_id}"):
+        if st.button("บันทึก Snapshot", icon="📸", key=f"capture_{camera.device_id}", disabled=feed_bytes is None):
             st.session_state[snapshot_count_key] += 1
             snapshot_number = st.session_state[snapshot_count_key]
             st.session_state[f"snapshot_bytes_{camera.device_id}"] = feed_bytes
-            st.session_state[f"snapshot_name_{camera.device_id}"] = f"{camera.device_id}_snapshot_{snapshot_number:03d}.jpg"
+            extension = "jpg" if night_vision else uploaded_image.name.rsplit(".", 1)[-1].lower()
+            st.session_state[f"snapshot_name_{camera.device_id}"] = f"{camera.device_id}_snapshot_{snapshot_number:03d}.{extension}"
+            st.session_state[f"snapshot_mime_{camera.device_id}"] = feed_mime
         snapshot_bytes = st.session_state.get(f"snapshot_bytes_{camera.device_id}")
         if snapshot_bytes:
             st.image(snapshot_bytes, caption=f"บันทึก Snapshot #{st.session_state[snapshot_count_key]} · {camera.name}", width="stretch")
-            st.download_button("ดาวน์โหลด Snapshot", snapshot_bytes, file_name=st.session_state[f"snapshot_name_{camera.device_id}"], mime="image/jpeg")
+            st.download_button("ดาวน์โหลด Snapshot", snapshot_bytes, file_name=st.session_state[f"snapshot_name_{camera.device_id}"], mime=st.session_state.get(f"snapshot_mime_{camera.device_id}", "image/jpeg"))
 
         vision_result = DurianVisionAnalyzer().analyze(camera)
         count_col, vision_col = st.columns([1, 2])
