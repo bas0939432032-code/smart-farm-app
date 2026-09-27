@@ -6,6 +6,8 @@ from datetime import date, datetime
 from typing import Any, Dict, Iterable, List, Optional
 import hashlib
 import io
+import json
+import random
 import unittest
 
 import pandas as pd
@@ -193,6 +195,39 @@ class ActuatorDevice(Device):
         return f"{self._name} เปลี่ยนสถานะเป็น {state}"
 
 
+class CCTVCamera(Device):
+    def __init__(self, device_id: str, name: str, location: str, stream_url: str = "") -> None:
+        super().__init__(device_id, name, location)
+        self._stream_url = stream_url.strip()
+        self._night_vision = False
+        self._snapshot_count = 0
+
+    @property
+    def stream_url(self) -> str:
+        return self._stream_url
+
+    def set_stream_url(self, value: str) -> None:
+        self._stream_url = value.strip()
+
+    @property
+    def night_vision(self) -> bool:
+        return self._night_vision
+
+    @property
+    def snapshot_count(self) -> int:
+        return self._snapshot_count
+
+    def set_night_vision(self, enabled: bool) -> None:
+        self._night_vision = bool(enabled)
+
+    def capture_snapshot(self) -> int:
+        self._snapshot_count += 1
+        return self._snapshot_count
+
+    def execute_action(self) -> str:
+        return f"กล้อง {self._name} พร้อมสตรีม" if self._is_active else f"กล้อง {self._name} ออฟไลน์"
+
+
 class Crop:
     def __init__(self, crop_id: int, name: str, ideal_moisture: float, growth_days: int) -> None:
         if not name.strip() or not 0 <= ideal_moisture <= 100 or growth_days <= 0:
@@ -294,11 +329,12 @@ class Farm:
 
 
 class SensorData:
-    def __init__(self, data_id: int, device_id: str, moisture: float, temp: float) -> None:
-        if not 0 <= moisture <= 100 or temp < -50 or temp > 80:
-            raise ValidationError("ค่าความชื้นหรืออุณหภูมิอยู่นอกช่วงที่รองรับ")
+    def __init__(self, data_id: int, device_id: str, moisture: float, temp: float, light: float = 650.0, ph: float = 6.5) -> None:
+        if not 0 <= moisture <= 100 or temp < -50 or temp > 80 or light < 0 or not 0 <= ph <= 14:
+            raise ValidationError("ค่าความชื้น อุณหภูมิ แสง หรือ pH อยู่นอกช่วงที่รองรับ")
         self._data_id, self._device_id = data_id, device_id
-        self._moisture, self._temp, self._timestamp = moisture, temp, datetime.now()
+        self._moisture, self._temp, self._light, self._ph = moisture, temp, light, ph
+        self._timestamp = datetime.now()
 
     @property
     def data_id(self) -> int:
@@ -315,6 +351,14 @@ class SensorData:
     @property
     def temp(self) -> float:
         return self._temp
+
+    @property
+    def light(self) -> float:
+        return self._light
+
+    @property
+    def ph(self) -> float:
+        return self._ph
 
     @property
     def timestamp(self) -> str:
@@ -428,6 +472,20 @@ class LowMoistureObserver(ISensorObserver):
         return None
 
 
+class UnsafeReadingObserver(ISensorObserver):
+    def update(self, data: SensorData) -> Optional[Notification]:
+        hazards = []
+        if data.temp >= 40:
+            hazards.append(f"อุณหภูมิ {data.temp:.1f} °C")
+        if data.ph < 4.5 or data.ph > 8.5:
+            hazards.append(f"pH {data.ph:.1f}")
+        if data.light >= 1500:
+            hazards.append(f"แสง {data.light:.0f} lux")
+        if hazards:
+            return Notification(0, f"ค่าจาก {data.device_id} อยู่ในระดับอันตราย: {', '.join(hazards)}", "เร่งด่วน")
+        return None
+
+
 class MoistureBasedStrategy(IIrrigationStrategy):
     def calculate_water(self, current_moisture: float, target_moisture: float) -> float:
         if not 0 <= current_moisture <= 100 or not 0 <= target_moisture <= 100:
@@ -443,7 +501,7 @@ class TimerBasedStrategy(IIrrigationStrategy):
 # ============================= Patterns and services =============================
 class DeviceFactory:
     @staticmethod
-    def create_device(dtype: str, dev_id: str, name: str, location: str, parameter: str) -> Device:
+    def create_device(dtype: str, dev_id: str, name: str, location: str, parameter: str = "") -> Device:
         if dtype.lower() == "sensor":
             return SensorDevice(dev_id, name, location, parameter)
         if dtype.lower() == "actuator":
@@ -451,7 +509,9 @@ class DeviceFactory:
                 return ActuatorDevice(dev_id, name, location, float(parameter))
             except (TypeError, ValueError) as error:
                 raise ValidationError("พารามิเตอร์ Actuator ต้องเป็นตัวเลข") from error
-        raise ValidationError("ประเภทอุปกรณ์ต้องเป็น Sensor หรือ Actuator")
+        if dtype.lower() in {"cctv", "camera"}:
+            return CCTVCamera(dev_id, name, location, parameter)
+        raise ValidationError("ประเภทอุปกรณ์ต้องเป็น Sensor, Actuator หรือ CCTV")
 
 
 class NotificationCenter:
@@ -571,15 +631,43 @@ class FarmRepository:
             self.seed()
 
     def next_id(self, table: str) -> int:
+        if table not in self._counters:
+            raise ValidationError(f"ไม่รู้จักตาราง {table}")
         self._counters[table] += 1
         return self._counters[table]
 
     def add(self, table: str, value: Any) -> Any:
+        if table not in self._data:
+            raise ValidationError(f"ไม่รู้จักตาราง {table}")
         self._data[table].append(value)
         return value
 
     def all(self, table: str) -> List[Any]:
+        if table not in self._data:
+            raise ValidationError(f"ไม่รู้จักตาราง {table}")
         return list(self._data[table])
+
+    def get(self, table: str, item_id: int) -> Optional[Any]:
+        id_attributes = {"users": "user_id", "farms": "farm_id", "plots": "plot_id", "crops": "crop_id", "irrigation_tasks": "task_id", "harvest_records": "record_id", "notifications": "notification_id"}
+        if table not in self._data:
+            raise ValidationError(f"ไม่รู้จักตาราง {table}")
+        attribute = id_attributes.get(table)
+        if attribute is None:
+            return next((item for item in self._data[table] if getattr(item, "data_id", None) == item_id), None)
+        return next((item for item in self._data[table] if getattr(item, attribute, None) == item_id), None)
+
+    def update(self, table: str, item_id: int, value: Any) -> Any:
+        current = self.get(table, item_id)
+        if current is None:
+            raise ValidationError(f"ไม่พบข้อมูลในตาราง {table}")
+        self._data[table][self._data[table].index(current)] = value
+        return value
+
+    def delete(self, table: str, item_id: int) -> None:
+        current = self.get(table, item_id)
+        if current is None:
+            raise ValidationError(f"ไม่พบข้อมูลในตาราง {table}")
+        self._data[table].remove(current)
 
     def seed(self) -> None:
         farmer = Farmer(self.next_id("users"), "วีรชัย ห้อยเหม", "veerachai@example.com", "SMART-2026")
@@ -605,6 +693,7 @@ class FarmRepository:
         self.add("crops", crop_b)
         self.add("devices", SensorDevice("S-101", "เซนเซอร์ความชื้น A1", "แปลง A1", "ความชื้นในดิน"))
         self.add("devices", ActuatorDevice("V-101", "วาล์วน้ำ A1", "แปลง A1", 30.5))
+        self.add("devices", CCTVCamera("C-101", "กล้องทางเข้าแปลง A1", "แปลง A1"))
         self.add("sensor_data", SensorData(self.next_id("sensor_data"), "S-101", 24, 28.5))
         self.add("sensor_data", SensorData(self.next_id("sensor_data"), "S-102", 68.5, 27))
         self.add("irrigation_tasks", IrrigationTask(self.next_id("irrigation_tasks"), "แปลงผักสลัด A1", 100))
@@ -620,7 +709,8 @@ class FarmService:
     def __init__(self, repository: FarmRepository) -> None:
         self._repo = repository
         self._center = NotificationCenter()
-        self._center.subscribe(LowMoistureObserver())
+        self._center.subscribe(LowMoistureObserver(PlatformConfigManager().get("moisture_alert_threshold", 30.0)))
+        self._center.subscribe(UnsafeReadingObserver())
 
     @property
     def repo(self) -> FarmRepository:
@@ -632,10 +722,10 @@ class FarmService:
             raise ValidationError("รหัสอุปกรณ์ซ้ำกัน")
         return self._repo.add("devices", device)
 
-    def record_sensor(self, device_id: str, moisture: float, temp: float) -> List[Notification]:
-        if not any(device.device_id == device_id for device in self._repo.all("devices")):
+    def record_sensor(self, device_id: str, moisture: float, temp: float, light: float = 650.0, ph: float = 6.5) -> List[Notification]:
+        if not any(device.device_id == device_id and isinstance(device, SensorDevice) for device in self._repo.all("devices")):
             raise ValidationError("ไม่พบอุปกรณ์เซนเซอร์")
-        data = self._repo.add("sensor_data", SensorData(self._repo.next_id("sensor_data"), device_id, moisture, temp))
+        data = self._repo.add("sensor_data", SensorData(self._repo.next_id("sensor_data"), device_id, moisture, temp, light, ph))
         notices = self._center.notify(data)
         for notice in notices:
             notice._notification_id = self._repo.next_id("notifications")
@@ -654,22 +744,85 @@ class FarmService:
         return self._repo.add("harvest_records", record)
 
 
+class PlatformConfigManager:
+    _instance: Optional[PlatformConfigManager] = None
+
+    def __new__(cls) -> PlatformConfigManager:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._settings = {
+                "moisture_alert_threshold": 30.0,
+                "platform_name": "Smart Farm",
+                "timezone": "Asia/Bangkok",
+            }
+        return cls._instance
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._settings.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        self._settings[key] = value
+
+
+class ApiSimulator:
+    ENDPOINTS = [
+        ("POST", "/api/v1/auth/login", "เข้าสู่ระบบ"), ("POST", "/api/v1/auth/register", "สมัครสมาชิก"),
+        ("GET", "/api/v1/users", "รายการผู้ใช้"), ("GET", "/api/v1/users/me", "โปรไฟล์ผู้ใช้"),
+        ("GET", "/api/v1/roles", "รายการบทบาท"), ("GET", "/api/v1/farms", "รายการฟาร์ม"),
+        ("POST", "/api/v1/farms", "สร้างฟาร์ม"), ("GET", "/api/v1/farms/{id}", "ดูฟาร์ม"),
+        ("PUT", "/api/v1/farms/{id}", "แก้ไขฟาร์ม"), ("DELETE", "/api/v1/farms/{id}", "ลบฟาร์ม"),
+        ("GET", "/api/v1/plots", "รายการแปลง"), ("POST", "/api/v1/plots", "สร้างแปลง"),
+        ("PUT", "/api/v1/plots/{id}", "แก้ไขแปลง"), ("DELETE", "/api/v1/plots/{id}", "ลบแปลง"),
+        ("GET", "/api/v1/crops", "รายการพืช"), ("POST", "/api/v1/crops", "ลงทะเบียนพืช"),
+        ("GET", "/api/v1/devices", "รายการอุปกรณ์"), ("POST", "/api/v1/devices", "ลงทะเบียนอุปกรณ์"),
+        ("POST", "/api/v1/sensors/telemetry", "รับ telemetry"), ("GET", "/api/v1/sensors/{id}/history", "ประวัติเซนเซอร์"),
+        ("POST", "/api/v1/irrigation/trigger", "สั่งรดน้ำ"), ("GET", "/api/v1/irrigation/logs", "ประวัติรดน้ำ"),
+        ("POST", "/api/v1/harvests", "บันทึกผลผลิต"), ("GET", "/api/v1/harvests/reports", "รายงานผลผลิต"),
+        ("GET", "/api/v1/notifications", "รายการแจ้งเตือน"), ("PATCH", "/api/v1/devices/{id}/status", "เปลี่ยนสถานะอุปกรณ์"),
+    ]
+
+    def __init__(self, repository: FarmRepository, users: UserRepository) -> None:
+        self._repository = repository
+        self._users = users
+
+    def simulate(self, method: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if (method, path) not in {(verb, endpoint) for verb, endpoint, _ in self.ENDPOINTS}:
+            return {"status": 404, "message": "ไม่พบ endpoint"}
+        if method == "GET" and path == "/api/v1/farms":
+            body = [{"id": item.farm_id, "name": item.name, "location": item.location} for item in self._repository.all("farms")]
+        elif method == "GET" and path == "/api/v1/devices":
+            body = [{"id": item.device_id, "name": item.name, "type": type(item).__name__} for item in self._repository.all("devices")]
+        elif method == "GET" and path == "/api/v1/harvests/reports":
+            body = {"yield_kg": sum(item.yield_kg for item in self._repository.all("harvest_records")), "revenue": sum(item.revenue for item in self._repository.all("harvest_records"))}
+        elif method == "GET" and path == "/api/v1/users":
+            body = [{"id": user.user_id, "username": user.username, "role": user.role} for user in self._users.all()]
+        else:
+            body = {"accepted": True, "method": method, "endpoint": path, "payload": payload}
+        return {"status": 200 if method == "GET" else 201, "message": "จำลองคำขอสำเร็จ", "data": body}
+
+
 # ============================= UI helpers =============================
 def get_state() -> tuple[FarmRepository, FarmService, UserRepository]:
-    if "farm_repository" not in st.session_state:
+    compatible_state = (
+        isinstance(st.session_state.get("farm_repository"), FarmRepository)
+        and isinstance(st.session_state.get("farm_service"), FarmService)
+        and isinstance(st.session_state.get("user_repository"), UserRepository)
+    )
+    if not compatible_state:
         st.session_state.farm_repository = FarmRepository()
         st.session_state.farm_service = FarmService(st.session_state.farm_repository)
-    if "user_repository" not in st.session_state:
         st.session_state.user_repository = UserRepository()
         for user in st.session_state.farm_repository.all("users"):
             st.session_state.user_repository.add_existing(user)
+    if not any(isinstance(device, CCTVCamera) for device in st.session_state.farm_repository.all("devices")):
+        st.session_state.farm_repository.add("devices", CCTVCamera("C-101", "กล้องทางเข้าแปลง A1", "แปลง A1"))
     if "current_user_id" not in st.session_state:
         st.session_state.current_user_id = 3
     return st.session_state.farm_repository, st.session_state.farm_service, st.session_state.user_repository
 
 
 def frame(table: str, rows: Iterable[Dict[str, Any]]) -> None:
-    st.dataframe(pd.DataFrame(list(rows)), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(list(rows)), width="stretch", hide_index=True)
 
 
 def run_tests() -> tuple[str, unittest.TestResult]:
@@ -695,9 +848,12 @@ def run_tests() -> tuple[str, unittest.TestResult]:
         def test_factory_polymorphism(self) -> None:
             sensor = DeviceFactory.create_device("sensor", "S-1", "ทดสอบ", "A1", "ความชื้น")
             actuator = DeviceFactory.create_device("actuator", "V-1", "ทดสอบ", "A1", "10")
+            camera = DeviceFactory.create_device("cctv", "C-1", "ทดสอบ", "A1")
             self.assertIsInstance(sensor, SensorDevice)
             self.assertIsInstance(actuator, ActuatorDevice)
+            self.assertIsInstance(camera, CCTVCamera)
             self.assertNotEqual(sensor.execute_action(), actuator.execute_action())
+            self.assertIn("พร้อมสตรีม", camera.execute_action())
 
         def test_strategy(self) -> None:
             self.assertEqual(MoistureBasedStrategy().calculate_water(30, 60), 75)
@@ -713,12 +869,37 @@ def run_tests() -> tuple[str, unittest.TestResult]:
             center = NotificationCenter()
             center.subscribe(LowMoistureObserver())
             self.assertEqual(len(center.notify(SensorData(1, "S-1", 20, 25))), 1)
+            center.subscribe(UnsafeReadingObserver())
+            self.assertEqual(len(center.notify(SensorData(2, "S-1", 50, 42, 700, 9))), 1)
 
         def test_integration_service(self) -> None:
             service = FarmService(repo)
             device = service.add_device("sensor", "S-99", "เซนเซอร์", "A1", "ความชื้น")
             self.assertEqual(device.device_id, "S-99")
-            self.assertEqual(len(service.record_sensor("S-99", 20, 25)), 1)
+            self.assertEqual(len(service.record_sensor("S-99", 20, 25, 700, 6.8)), 1)
+            reading = repo.all("sensor_data")[-1]
+            self.assertEqual((reading.light, reading.ph), (700, 6.8))
+
+        def test_singleton_and_farm_repository_crud(self) -> None:
+            self.assertIs(PlatformConfigManager(), PlatformConfigManager())
+            owner = Farmer(1, "เจ้าของ", "owner@test.com", "1234")
+            farm = Farm(1, "ฟาร์มทดสอบ", owner)
+            repo.add("farms", farm)
+            self.assertIs(repo.get("farms", 1), farm)
+            replacement = Farm(1, "ฟาร์มใหม่", owner)
+            repo.update("farms", 1, replacement)
+            self.assertIs(repo.get("farms", 1), replacement)
+            repo.delete("farms", 1)
+            self.assertIsNone(repo.get("farms", 1))
+
+        def test_api_endpoint_catalog(self) -> None:
+            api = ApiSimulator(repo, UserRepository())
+            self.assertGreaterEqual(len(api.ENDPOINTS), 20)
+            self.assertEqual(api.simulate("GET", "/api/v1/farms", {})["status"], 200)
+
+        def test_seed_includes_cctv_camera(self) -> None:
+            seeded_devices = FarmRepository().all("devices")
+            self.assertTrue(any(isinstance(device, CCTVCamera) for device in seeded_devices))
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(SmartFarmTests)
     output = io.StringIO()
@@ -737,27 +918,30 @@ repo, service, user_repo = get_state()
 farm = repo.all("farms")[0]
 users = user_repo.all()
 user_labels = {user.user_id: f"{user.username} ({user.role})" for user in users}
-selected_id = st.sidebar.selectbox("ผู้ใช้จำลอง (Authentication)", list(user_labels), format_func=lambda value: user_labels[value], index=0)
+selected_ids = list(user_labels)
+default_index = selected_ids.index(st.session_state.current_user_id) if st.session_state.current_user_id in selected_ids else 0
+selected_id = st.sidebar.selectbox("ผู้ใช้จำลอง (Authentication)", selected_ids, format_func=lambda value: user_labels[value], index=default_index)
 st.session_state.current_user_id = selected_id
 current_user = user_repo.get(selected_id)
 st.sidebar.markdown(f"**ผู้ใช้งาน:** {current_user.username if current_user else '-'}")
 st.sidebar.markdown(f"**บทบาท:** `{current_user.role if current_user else '-'}`")
 st.sidebar.markdown("**สิทธิ์:** " + ", ".join(current_user.get_permissions()) if current_user else "")
-all_menus = ["📊 Dashboard", "🧩 สถาปัตยกรรมและ Checklist", "👥 จัดการผู้ใช้งาน", "📡 อุปกรณ์ฮาร์ดแวร์", "💧 คำนวณการรดน้ำ", "🌾 ผลผลิตและรายได้", "🌐 REST API Simulator", "🧪 Unit & Integration Testing"]
+all_menus = ["📊 ภาพรวมฟาร์ม", "📹 กล้องวงจรปิด", "📡 Live Telemetry", "👥 จัดการผู้ใช้งาน", "🧩 สถาปัตยกรรมและ Checklist", "📡 อุปกรณ์ฮาร์ดแวร์", "💧 คำนวณการรดน้ำ", "🌾 ผลผลิตและรายได้", "🌐 REST API Simulator", "🧪 Unit & Integration Testing"]
 restricted = {"👥 จัดการผู้ใช้งาน", "🌐 REST API Simulator", "🧪 Unit & Integration Testing"}
 allowed_menus = [item for item in all_menus if item not in restricted or (current_user and current_user.role in {"ผู้ดูแลระบบ", "ซูเปอร์แอดมิน"})]
 menu = st.sidebar.radio("เมนูหลัก", allowed_menus)
 st.title("🌱 ระบบจัดการฟาร์มอัจฉริยะ")
 st.caption("Smart Farm Management System | Full Stack OOP Project Standard")
 
-if menu == "📊 Dashboard":
+if menu == "📊 ภาพรวมฟาร์ม":
     st.header("📊 ภาพรวมฟาร์ม")
     harvests = repo.all("harvest_records")
-    cards = st.columns(4)
+    cards = st.columns(5)
     cards[0].metric("ฟาร์ม", len(repo.all("farms")))
     cards[1].metric("แปลงปลูก", len(repo.all("plots")))
     cards[2].metric("พืชกำลังปลูก", sum(c.status == "กำลังปลูก" for c in repo.all("crops")))
     cards[3].metric("ผลผลิตสะสม", f"{sum(h.yield_kg for h in harvests):,.1f} กก.")
+    cards[4].metric("การแจ้งเตือน", len(repo.all("notifications")))
     left, right = st.columns(2)
     with left:
         frame("sensor_data", [{"อุปกรณ์": s.device_id, "ความชื้น": f"{s.moisture}%", "อุณหภูมิ": f"{s.temp} °C", "เวลา": s.timestamp} for s in repo.all("sensor_data")])
@@ -766,11 +950,67 @@ if menu == "📊 Dashboard":
         for notice in repo.all("notifications"):
             st.warning(f"[{notice.created_at}] {notice.message}")
 
+elif menu == "📹 กล้องวงจรปิด":
+    st.header("📹 กล้องวงจรปิดดูสวน")
+    cameras = [device for device in repo.all("devices") if isinstance(device, CCTVCamera)]
+    if not cameras:
+        st.info("ยังไม่มีกล้อง CCTV ลงทะเบียนที่เมนูอุปกรณ์ฮาร์ดแวร์")
+    else:
+        camera = st.selectbox("กล้องประจำแปลง", cameras, format_func=lambda item: f"{item.name} · {item.location}")
+        stream_url = st.text_input("Stream URL (HTTP/HLS)", value=camera.stream_url, key=f"stream_{camera.device_id}")
+        camera.set_night_vision(st.toggle("Night Vision", value=camera.night_vision, key=f"night_{camera.device_id}"))
+        if stream_url != camera.stream_url:
+            camera.set_stream_url(stream_url)
+        if camera.stream_url:
+            st.video(camera.stream_url)
+        else:
+            st.info("ยังไม่ได้กำหนด URL สตรีม โปรดลงทะเบียน URL ที่ใช้งานร่วมกับเบราว์เซอร์ได้")
+        snapshot = st.file_uploader("ภาพจากกล้องสำหรับบันทึก Snapshot", type=["png", "jpg", "jpeg"], key=f"snapshot_{camera.device_id}")
+        if st.button("บันทึก Snapshot", icon="📸", disabled=snapshot is None):
+            camera.capture_snapshot()
+            st.session_state[f"snapshot_bytes_{camera.device_id}"] = snapshot.getvalue()
+            st.session_state[f"snapshot_name_{camera.device_id}"] = snapshot.name
+        snapshot_bytes = st.session_state.get(f"snapshot_bytes_{camera.device_id}")
+        if snapshot_bytes:
+            st.image(snapshot_bytes, caption=f"Snapshot #{camera.snapshot_count} · {camera.name}", width="stretch")
+            st.download_button("ดาวน์โหลด Snapshot", snapshot_bytes, file_name=st.session_state[f"snapshot_name_{camera.device_id}"])
+        overlay_motion, overlay_disease = st.columns(2)
+        with overlay_motion:
+            st.warning("Motion Detection: พบการเคลื่อนไหว (ตัวอย่างจำลอง)")
+        with overlay_disease:
+            st.info("Disease Detection: ไม่พบความผิดปกติ (ตัวอย่างจำลอง)")
+        st.caption("AI overlays เป็นสถานะจำลองสำหรับสาธิต ไม่ได้วิเคราะห์ภาพด้วยโมเดล AI จริง")
+
+elif menu == "📡 Live Telemetry":
+    st.header("📡 สตรีมมิ่งเซนเซอร์เรียลไทม์")
+    sensors = [device for device in repo.all("devices") if isinstance(device, SensorDevice)]
+    if sensors:
+        sensor = st.selectbox("เซนเซอร์", sensors, format_func=lambda item: f"{item.name} · {item.location}")
+        history = [item for item in repo.all("sensor_data") if item.device_id == sensor.device_id]
+        latest = history[-1] if history else None
+        if latest:
+            metric_cols = st.columns(4)
+            metric_cols[0].metric("ความชื้น", f"{latest.moisture:.1f}%")
+            metric_cols[1].metric("อุณหภูมิ", f"{latest.temp:.1f} °C")
+            metric_cols[2].metric("แสง", f"{latest.light:.0f} lux")
+            metric_cols[3].metric("pH", f"{latest.ph:.1f}")
+            threshold = float(PlatformConfigManager().get("moisture_alert_threshold", 30.0))
+            if latest.moisture < threshold:
+                st.error(f"ความชื้นวิกฤต {latest.moisture:.1f}% ต่ำกว่าเกณฑ์ {threshold:.0f}%")
+        if st.button("รับค่า telemetry จำลองใหม่", icon="🔄"):
+            service.record_sensor(sensor.device_id, round(random.uniform(18, 85), 1), round(random.uniform(22, 36), 1), round(random.uniform(150, 1200), 1), round(random.uniform(5.5, 7.5), 1))
+            st.rerun()
+        chart = pd.DataFrame([{"เวลา": item.timestamp, "ความชื้น (%)": item.moisture, "อุณหภูมิ (°C)": item.temp, "แสง (lux)": item.light, "pH": item.ph} for item in history]).set_index("เวลา")
+        st.line_chart(chart)
+        frame("sensor_data", [{"เวลา": item.timestamp, "ความชื้น (%)": item.moisture, "อุณหภูมิ (°C)": item.temp, "แสง (lux)": item.light, "pH": item.ph} for item in reversed(history)])
+    else:
+        st.info("ลงทะเบียน Sensor ก่อนเริ่มรับ telemetry")
+
 elif menu == "🧩 สถาปัตยกรรมและ Checklist":
     st.header("🧩 สถาปัตยกรรม OOP และ Full Stack Checklist")
-    st.markdown("""**Domain Classes (13 คลาส):** `User`, `Farmer`, `Admin`, `Device`, `SensorDevice`, `ActuatorDevice`, `Farm`, `Plot`, `Crop`, `SensorData`, `IrrigationTask`, `HarvestRecord`, `Notification`  
-**Patterns:** `DeviceFactory`, `MoistureBasedStrategy`, `TimerBasedStrategy`, `FarmRepository`, `NotificationCenter`  
-**ความสัมพันธ์:** Farm composition กับ Plot, Plot aggregation กับ Crop, Farmer association กับ Farm, inheritance ของ User และ Device""")
+    st.markdown("""**คลาส (มากกว่า 15):** `User`, `Farmer`, `Admin`, `SuperAdmin`, `Device`, `SensorDevice`, `ActuatorDevice`, `CCTVCamera`, `Farm`, `Plot`, `Crop`, `SensorData`, `IrrigationTask`, `HarvestRecord`, `Notification`, `UserRepository`, `FarmRepository`, `FarmService`, `DeviceFactory`, `MoistureBasedStrategy`, `TimerBasedStrategy`, `NotificationCenter`, `LowMoistureObserver`, `PlatformConfigManager`, `ApiSimulator`  
+**Patterns:** Factory, Strategy, Repository, Observer, Singleton  
+**ความสัมพันธ์:** Farm composition กับ Plot, Plot aggregation กับ Crop, Farmer association กับ Farm, inheritance/polymorphism ของ User และ Device""")
     st.subheader("ตารางข้อมูลจำลอง 10 ตาราง")
     frame("tables", [{"ตาราง": table, "รายการ": len(repo.all(table))} for table in FarmRepository.TABLES])
     st.subheader("Business Rules (12 ข้อ)")
@@ -855,11 +1095,13 @@ elif menu == "👥 จัดการผู้ใช้งาน":
 elif menu == "📡 อุปกรณ์ฮาร์ดแวร์":
     st.header("📡 จัดการอุปกรณ์ด้วย Factory Pattern")
     with st.form("device_form"):
-        dtype = st.selectbox("ชนิดอุปกรณ์", ["Sensor", "Actuator"])
+        dtype = st.selectbox("ชนิดอุปกรณ์", ["Sensor", "Actuator", "CCTV"])
         device_id = st.text_input("รหัสอุปกรณ์", "DEV-003")
         name = st.text_input("ชื่ออุปกรณ์", "อุปกรณ์โซน B")
         location = st.text_input("ตำแหน่ง", "แปลง B1")
-        parameter = st.text_input("ประเภทเซนเซอร์ / อัตราการไหล", "ความชื้นในดิน" if dtype == "Sensor" else "30.5")
+        parameter_label = "ประเภทเซนเซอร์" if dtype == "Sensor" else "อัตราการไหล (ลิตร/นาที)" if dtype == "Actuator" else "Stream URL (เว้นว่างได้)"
+        parameter_default = "ความชื้นในดิน" if dtype == "Sensor" else "30.5" if dtype == "Actuator" else ""
+        parameter = st.text_input(parameter_label, parameter_default)
         submitted = st.form_submit_button("สร้างอุปกรณ์")
     if submitted:
         try:
@@ -872,7 +1114,9 @@ elif menu == "📡 อุปกรณ์ฮาร์ดแวร์":
         if isinstance(device, SensorDevice):
             device_type, state, action = device.sensor_type, "ออนไลน์" if device.is_active else "ออฟไลน์", device.execute_action()
         elif isinstance(device, ActuatorDevice):
-            device_type, state, action = "วาล์วน้ำ", device.state, device.execute_action()
+            device_type, state, action = "วาล์วน้ำ", device.state, f"{device.capacity_lpm:g} ลิตร/นาที"
+        elif isinstance(device, CCTVCamera):
+            device_type, state, action = "CCTV", "Night Vision" if device.night_vision else "ปกติ", device.execute_action()
         else:
             device_type, state, action = "อุปกรณ์ทั่วไป", "ออนไลน์" if device.is_active else "ออฟไลน์", device.execute_action()
         rows.append({"รหัส": device.device_id, "ชื่อ": device.name, "ประเภท": device_type, "ตำแหน่ง": device.location, "สถานะ": state, "การทำงาน": action})
@@ -912,9 +1156,20 @@ elif menu == "🌾 ผลผลิตและรายได้":
 
 elif menu == "🌐 REST API Simulator":
     st.header("🌐 REST API Endpoints Simulator")
-    endpoints = [("POST", "/api/v1/auth/login", "เข้าสู่ระบบ"), ("POST", "/api/v1/auth/register", "สมัครสมาชิก"), ("GET", "/api/v1/users/me", "โปรไฟล์"), ("GET", "/api/v1/roles", "บทบาท"), ("GET", "/api/v1/farms", "รายการฟาร์ม"), ("POST", "/api/v1/farms", "สร้างฟาร์ม"), ("GET", "/api/v1/farms/{id}", "ฟาร์มตามรหัส"), ("PUT", "/api/v1/farms/{id}", "แก้ไขฟาร์ม"), ("DELETE", "/api/v1/farms/{id}", "ลบฟาร์ม"), ("GET", "/api/v1/plots", "รายการแปลง"), ("POST", "/api/v1/plots", "สร้างแปลง"), ("PUT", "/api/v1/plots/{id}", "แก้ไขแปลง"), ("GET", "/api/v1/crops", "รายการพืช"), ("POST", "/api/v1/crops", "สร้างพืช"), ("GET", "/api/v1/devices", "รายการอุปกรณ์"), ("POST", "/api/v1/devices", "ลงทะเบียนอุปกรณ์"), ("POST", "/api/v1/sensors/telemetry", "รับค่าเซนเซอร์"), ("GET", "/api/v1/sensors/{id}/history", "ประวัติเซนเซอร์"), ("POST", "/api/v1/irrigation/trigger", "สั่งรดน้ำ"), ("GET", "/api/v1/irrigation/logs", "ประวัติรดน้ำ"), ("POST", "/api/v1/harvests", "บันทึกผลผลิต"), ("GET", "/api/v1/harvests/reports", "รายงานผลผลิต")]
-    frame("api", [{"Method": method, "Endpoint": path, "คำอธิบาย": description} for method, path, description in endpoints])
-    st.success(f"จำลองทั้งหมด {len(endpoints)} endpoints")
+    api = ApiSimulator(repo, user_repo)
+    frame("api", [{"Method": method, "Endpoint": path, "คำอธิบาย": description} for method, path, description in api.ENDPOINTS])
+    st.success(f"จำลองทั้งหมด {len(api.ENDPOINTS)} endpoints")
+    selected_endpoint = st.selectbox("เลือก endpoint", api.ENDPOINTS, format_func=lambda item: f"{item[0]} {item[1]} · {item[2]}")
+    payload_text = st.text_area("Request body (JSON)", value="{}", height=100)
+    if st.button("ส่งคำขอจำลอง", icon="▶"):
+        try:
+            payload = json.loads(payload_text)
+            if not isinstance(payload, dict):
+                raise ValidationError("Request body ต้องเป็น JSON object")
+            response = api.simulate(selected_endpoint[0], selected_endpoint[1], payload)
+            st.code(json.dumps(response, ensure_ascii=False, indent=2), language="json")
+        except (json.JSONDecodeError, ValidationError) as error:
+            st.error(f"คำขอไม่ถูกต้อง: {error}")
 
 else:
     st.header("🧪 Unit & Integration Testing Suite")
